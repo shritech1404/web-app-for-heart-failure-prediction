@@ -32,4 +32,4 @@ def after():
         return render_template("main2.html")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
