@@ -1,0 +1,85 @@
+{% extends 'base.html' %}
+{% block title %}Home{% endblock title %}
+{% block body %}
+<div class="section no-pad-bot" id="index-banner">
+  <div class="container py-5">
+    <div class="text-center mb-4">
+      <h1 class="header center orange-text">HEART FAILURE PREDICTION</h1>
+      <p class="header col s12 light my-3">Let's check your heart!</p>
+    </div>
+    <form action="{{ url_for('after') }}" method="POST" class="row g-3 justify-content-center">
+      <div class="col-md-3">
+        <label class="form-label" for="Age"><strong>Age</strong></label>
+        <input class="form-control" name="Age" id="Age" type="number" min="1" max="120" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Anaemia"><strong>Anaemia</strong></label>
+        <select class="form-select" id="Anaemia" name="Anaemia" required>
+          <option disabled selected value> -- Select an Option -- </option>
+          <option value="0">No</option>
+          <option value="1">Yes</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Creatinine_phosphokinase"><strong>Creatinine phosphokinase</strong></label>
+        <input class="form-control" name="Creatinine_phosphokinase" id="Creatinine_phosphokinase" type="number" min="1" max="10000" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Diabetes"><strong>Diabetes</strong></label>
+        <select class="form-select" id="Diabetes" name="Diabetes" required>
+          <option disabled selected value> -- Select an Option -- </option>
+          <option value="0">No</option>
+          <option value="1">Yes</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Enjection_Fraction"><strong>Ejection Fraction</strong></label>
+        <input class="form-control" name="Enjection_Fraction" id="Enjection_Fraction" type="number" min="1" max="200" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="HBP"><strong>High Blood Pressure</strong></label>
+        <select class="form-select" id="HBP" name="HBP" required>
+          <option disabled selected value> -- Select an Option -- </option>
+          <option value="0">No</option>
+          <option value="1">Yes</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Platelets"><strong>Platelets (x10³/µL)</strong></label>
+        <input class="form-control" name="Platelets" id="Platelets" type="number" min="1" max="900" step="0.1" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Serum_creatinine"><strong>Serum creatinine</strong></label>
+        <input class="form-control" name="Serum_creatinine" id="Serum_creatinine" type="number" min="0" max="10" step="0.1" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Serum_sodium"><strong>Serum sodium</strong></label>
+        <input class="form-control" name="Serum_sodium" id="Serum_sodium" type="number" min="1" max="200" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Sex"><strong>Sex</strong></label>
+        <select class="form-select" id="Sex" name="Sex" required>
+          <option disabled selected value> -- Select an Option -- </option>
+          <option value="0">Female</option>
+          <option value="1">Male</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Smoking"><strong>Smoking</strong></label>
+        <select class="form-select" id="Smoking" name="Smoking" required>
+          <option disabled selected value> -- Select an Option -- </option>
+          <option value="0">No</option>
+          <option value="1">Yes</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="Time"><strong>Follow-up period (days)</strong></label>
+        <input class="form-control" name="Time" id="Time" type="number" min="1" max="1000" required>
+      </div>
+      <div class="col-12 text-center mt-4">
+        <button type="submit" class="btn btn-dark px-5">Predict Result</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock body %}
