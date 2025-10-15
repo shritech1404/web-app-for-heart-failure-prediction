@@ -39,3 +39,5 @@ import pickle
 pickle.dump(model, open('heart.pkl', 'wb'))
 model=pickle.load(open('heart.pkl','rb'))
 print(model.predict([[75.0, 0, 582, 0, 20, 1, 265000.00, 1.9, 130, 1, 0, 4]]))
+
+print("Done")
