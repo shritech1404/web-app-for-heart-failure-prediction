@@ -9,103 +9,58 @@ on:
 permissions:
   pull-requests: write
   contents: read
-  issues: write
 
 jobs:
   codex-review:
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.head_ref }}
 
-      - name: Setup dependencies / install Codex
+      - name: Setup Codex CLI via npm
         run: |
-          echo "Installing Codex CLI"
           npm install -g @openai/codex
+          # add npm global bin to PATH
           echo "$(npm bin -g)" >> $GITHUB_PATH
 
-      - name: Debug Codex install
+      - name: Debug codex installation
         run: |
-          which codex || echo "codex not in PATH"
-          codex --version || true
+          which codex || echo "codex not installed"
+          codex --version
 
-      - name: Run Codex Review
+      - name: Run codex review
         id: review
-        continue-on-error: true
         run: |
-          echo "Running Codex review via exec mode"
-          codex exec "review code"
-          # if codex exec returns non-zero, the step fails
-        # default behavior: on failure, subsequent steps skip
+          codex review
 
-      - name: Update Documentation
+      - name: Update documentation / README
         id: docs
-        if: steps.review.outcome == 'success'
-        continue-on-error: true
         run: |
-          codex exec "update documentation based on code changes"
+          codex update-docs
 
-      - name: Security Vulnerability Scan
+      - name: Check vulnerabilities
         id: vuln
-        if: steps.review.outcome == 'success'
-        continue-on-error: true
         run: |
-          codex exec "scan vulnerabilities"
+          codex scan vulnerabilities
 
-      - name: Performance Analysis
+      - name: Performance summary
         id: perf
-        if: steps.review.outcome == 'success' && steps.vuln.outcome == 'success'
-        continue-on-error: true
         run: |
-          codex exec "performance summary"
+          codex perf-summary
 
-      - name: Collect Results
-        id: results
-        if: always()
-        run: |
-          # you can collect outcomes into outputs for summary
-          echo "review_outcome=${{ steps.review.outcome }}" >> $GITHUB_OUTPUT
-          echo "docs_outcome=${{ steps.docs.outcome }}" >> $GITHUB_OUTPUT
-          echo "vuln_outcome=${{ steps.vuln.outcome }}" >> $GITHUB_OUTPUT
-          echo "perf_outcome=${{ steps.perf.outcome }}" >> $GITHUB_OUTPUT
-
-          if [ "${{ steps.review.outcome }}" != "success" ]; then
-            echo "overall_status=failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=review failed" >> $GITHUB_OUTPUT
-          elif [ "${{ steps.vuln.outcome }}" != "success" ]; then
-            echo "overall_status=failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=vulnerabilities found" >> $GITHUB_OUTPUT
-          else
-            echo "overall_status=success" >> $GITHUB_OUTPUT
-            echo "failure_reason=none" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Post Summary as Comment
+      - name: Post summary comment
         if: always()
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## Codex Review Pipeline Results
-            - Review: ${{ steps.review.outcome }}
-            - Docs: ${{ steps.docs.outcome }}
-            - Vulnerability Scan: ${{ steps.vuln.outcome }}
-            - Performance: ${{ steps.perf.outcome }}
-
-            **Overall status**: ${{ steps.results.outputs.overall_status }}
-            ${{ steps.results.outputs.failure_reason != 'none' && format("**Reason**: {0}", steps.results.outputs.failure_reason) || '' }}
-
-      - name: Final Status Check
-        if: always()
-        run: |
-          if [ "${{ steps.results.outputs.overall_status }}" = "failed" ]; then
-            echo "❌ Pipeline failed"
-            exit 1
-          fi
-          echo "✅ All checks passed"
+            ## Codex Automated Review Summary  
+            **Review step**: ${{ steps.review.outcome }}  
+            **Docs update**: ${{ steps.docs.outcome }}  
+            **Vulnerability scan**: ${{ steps.vuln.outcome }}  
+            **Performance summary**: ${{ steps.perf.outcome }}  
+            
+            _If any step failed, subsequent checks were skipped._
