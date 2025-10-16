@@ -14,43 +14,48 @@ jobs:
   codex-review:
     runs-on: ubuntu-latest
     env:
-      CODEX_QUIET_MODE: "1"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
 
-      - name: Install Codex CLI
+      - name: Install Codex CLI via npm
         run: |
           npm install -g @openai/codex
           echo "$(npm bin -g)" >> $GITHUB_PATH
 
-      - name: Debug codex install
+      - name: Debug codex installation
         run: |
-          which codex
+          which codex || echo "codex not installed"
           codex --version || true
 
-      - name: Run codex review non-interactive
+      # Step 1: Review code (non-interactive)
+      - name: Run codex review (exec mode)
         id: review
         run: |
           codex exec "review code"
 
+      # Step 2: Update documentation / README
       - name: Update documentation / README
         id: docs
         run: |
-          codex --no-terminal --quiet update-docs
+          codex exec "update documentation based on changes"
 
+      # Step 3: Check vulnerabilities
       - name: Check vulnerabilities
         id: vuln
         run: |
-          codex --no-terminal --quiet scan vulnerabilities
+          codex exec "scan vulnerabilities"
 
+      # Step 4: Performance / summary review
       - name: Performance summary
         id: perf
         run: |
-          codex --no-terminal --quiet perf-summary
+          codex exec "give performance summary"
 
+      # Step 5: Post summary comment on the PR
       - name: Post summary comment
         if: always()
         uses: peter-evans/create-or-update-comment@v4
@@ -63,3 +68,6 @@ jobs:
             **Docs update**: ${{ steps.docs.outcome }}  
             **Vulnerability scan**: ${{ steps.vuln.outcome }}  
             **Performance summary**: ${{ steps.perf.outcome }}  
+            
+            _If any step failed, subsequent checks would not run._
+
