@@ -2,7 +2,7 @@ name: Codex Automation
 
 on:
   push:
-    branches: [ main ]
+    branches: [ codexTest ]
   pull_request:
 
 jobs:
