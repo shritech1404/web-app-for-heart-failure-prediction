@@ -8,7 +8,7 @@ target = heart.DEATH_EVENT
 
 heart = heart.drop('DEATH_EVENT', axis='columns')
 heart
-
+print("hello")
 from sklearn.model_selection import train_test_split
 X_train, X_test, y_train, y_test = train_test_split(heart, target, test_size=0.2, random_state=10)
 
