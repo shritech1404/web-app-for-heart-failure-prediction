@@ -1,0 +1,67 @@
+name: Codex Automated Review Pipeline
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+
+permissions:
+  pull-requests: write   # needed to post comments
+  contents: read          # needed for checkout and reading files
+
+jobs:
+  codex-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup dependencies
+        run: |
+          # install required dependencies / build tools
+          # e.g. npm install, pip install, etc.
+          echo "Setup project dependencies …"
+
+      # Step 1: Review code
+      - name: Run codex review
+        id: review
+        run: |
+          ./codex review
+        # If this exits non-zero, the job fails and subsequent steps won’t run
+
+      # Step 2: Update documentation / README
+      - name: Update documentation / README
+        id: docs
+        run: |
+          ./codex update-docs
+        # This runs only if review succeeded
+
+      # Step 3: Check vulnerabilities
+      - name: Check vulnerabilities
+        id: vuln
+        run: |
+          ./codex scan vulnerabilities
+
+      # Step 4: Performance / summary review
+      - name: Performance summary
+        id: perf
+        run: |
+          ./codex perf-summary
+
+      # Step 5: Post summary comment on the PR
+      - name: Post summary comment
+        if: always()  # so it runs even if some step failed
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## ✅ Codex Automated Review Summary  
+            **Review step**: ${{ steps.review.outcome }}  
+            **Docs update**: ${{ steps.docs.outcome }}  
+            **Vulnerability scan**: ${{ steps.vuln.outcome }}  
+            **Performance summary**: ${{ steps.perf.outcome }}  
+            
+            *If any step failed, subsequent checks were skipped.*
+
