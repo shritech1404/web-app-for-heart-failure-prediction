@@ -3,97 +3,45 @@ name: Codex Automated Review
 on:
   pull_request:
     branches:
-      - codexNew        # <- change to main if needed
+      - codexNew            # ← change to main/develop if needed
     types: [opened, synchronize, reopened]
 
 jobs:
   codex-review:
     runs-on: ubuntu-latest
-    env:
-      # flip to 'required' to fail if codex isn't available
-      CODEX_REQUIRED: "optional"
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- Install Codex CLI (choose ONE path below and remove the other) ---
-      # If Codex is an npm package:
-      - name: Install Codex CLI (npm)
+      # ---------------- NPM AUTH FOR PRIVATE @codex SCOPE ----------------
+      # Assumes @codex/cli is published to GitHub Packages (npm.pkg.github.com)
+      - name: Configure npm for GitHub Packages
+        run: |
+          echo "@codex:registry=https://npm.pkg.github.com" >> ~/.npmrc
+          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------- OPTIONAL: SETUP NODE (pick a version you support) ---------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ---------------- INSTALL CODEX CLI ---------------------------------
+      - name: Install Codex CLI (private)
+        run: npm install -g @codex/cli
+
+      # ---------------- RUN CODEX CHECKS ----------------------------------
+      - name: Run Codex checks
         run: |
           set -e
-          if ! command -v codex >/dev/null 2>&1; then
-            echo "Attempting npm install for Codex CLI..."
-            npm -v >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y nodejs npm)
-            npm install -g @codex/cli || true
-          fi
+          codex lint
+          codex scan vulnerabilities
+          codex check-readme
 
-      # If Codex is a Python package instead, use this instead of the npm step:
-      # - name: Install Codex CLI (pip)
-      #   run: |
-      #     set -e
-      #     if ! command -v codex >/dev/null 2>&1; then
-      #       echo "Attempting pip install for Codex CLI..."
-      #       python3 -m pip install --upgrade pip
-      #       python3 -m pip install codex-cli || true
-      #     fi
-
-      - name: Verify Codex availability (or fallback)
-        id: codex_check
-        run: |
-          set -e
-          if command -v codex >/dev/null 2>&1; then
-            echo "codex_cli=present" >> $GITHUB_OUTPUT
-            echo "Codex CLI found: $(command -v codex)"
-          else
-            echo "codex_cli=absent" >> $GITHUB_OUTPUT
-            echo "Codex CLI NOT found."
-            if [ "${CODEX_REQUIRED}" = "required" ]; then
-              echo "Codex is required; failing job."
-              exit 1
-            fi
-          fi
-
-      # ---------------- LINT ----------------
-      - name: Run lint / style checks
-        run: |
-          set -e
-          if [ "${{ steps.codex_check.outputs.codex_cli }}" = "present" ]; then
-            codex lint
-          else
-            echo "Codex CLI not found; using project lint fallback..."
-            # Replace with your actual project command:
-            # npm ci && npm run lint
-            # python -m pip install -r requirements-dev.txt && ruff check .
-            echo "No fallback configured; skipping lint."
-          fi
-
-      # ------------- VULNERABILITIES -------------
-      - name: Check vulnerabilities / dependencies
-        run: |
-          set -e
-          if [ "${{ steps.codex_check.outputs.codex_cli }}" = "present" ]; then
-            codex scan vulnerabilities
-          else
-            echo "Codex CLI not found; using project vuln scan fallback..."
-            # Example fallbacks (pick one and configure):
-            # npm audit --audit-level=high
-            # pip-audit
-            echo "No fallback configured; skipping vulnerability scan."
-          fi
-
-      # ------------- README / DOCS -------------
-      - name: Ensure README / docs updated
-        run: |
-          set -e
-          if [ "${{ steps.codex_check.outputs.codex_cli }}" = "present" ]; then
-            codex check-readme
-          else
-            echo "Codex CLI not found; using docs check fallback..."
-            # Add your own doc-check logic or enforce a PR label/title gate.
-            echo "No fallback configured; skipping README/docs check."
-          fi
-
-      # ------------- SUMMARY COMMENT -------------
+      # ---------------- SUMMARY COMMENT ON THE PR -------------------------
       - name: Post summary comment
         if: always()
         uses: peter-evans/create-or-update-comment@v3
@@ -103,12 +51,12 @@ jobs:
           body: |
             **Codex Automated Review**
             - Status: **${{ job.status }}**
-            - Codex CLI: **${{ steps.codex_check.outputs.codex_cli }}**
             - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            ${{ job.status == 'success' && '✅ All checks passed.' || '❌ Some checks failed. See logs above.' }}
 
-            ${{ job.status == 'success' && '✅ All checks passed.' || '❌ Some checks failed. See logs.' }}
-
-      # ------------- OPTIONAL: EMAIL ON FAILURE -------------
+      # ---------------- OPTIONAL: EMAIL ON FAILURE ------------------------
+      # Fill these secrets in your repo settings if you want email alerts:
+      # SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFY_TO, NOTIFY_FROM
       - name: Send failure email
         if: failure()
         uses: dawidd6/action-send-mail@v3
