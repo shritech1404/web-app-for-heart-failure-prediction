@@ -14,26 +14,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ---------------- NPM AUTH FOR PRIVATE @codex SCOPE ----------------
-      # Assumes @codex/cli is published to GitHub Packages (npm.pkg.github.com)
-      - name: Configure npm for GitHub Packages
-        run: |
-          echo "@codex:registry=https://npm.pkg.github.com" >> ~/.npmrc
-          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ---------------- OPTIONAL: SETUP NODE (pick a version you support) ---------------
+      # ---------------- SETUP NODE ENVIRONMENT ----------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # ---------------- INSTALL CODEX CLI ---------------------------------
+      # ---------------- INSTALL CODEX CLI ----------------
       - name: Install Codex CLI (private)
         run: npm install -g @codex/cli
 
-      # ---------------- RUN CODEX CHECKS ----------------------------------
+      # ---------------- RUN CODEX CHECKS ----------------
       - name: Run Codex checks
         run: |
           set -e
@@ -41,7 +32,7 @@ jobs:
           codex scan vulnerabilities
           codex check-readme
 
-      # ---------------- SUMMARY COMMENT ON THE PR -------------------------
+      # ---------------- SUMMARY COMMENT ----------------
       - name: Post summary comment
         if: always()
         uses: peter-evans/create-or-update-comment@v3
@@ -51,24 +42,5 @@ jobs:
           body: |
             **Codex Automated Review**
             - Status: **${{ job.status }}**
-            - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - Run: [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
             ${{ job.status == 'success' && '✅ All checks passed.' || '❌ Some checks failed. See logs above.' }}
-
-      # ---------------- OPTIONAL: EMAIL ON FAILURE ------------------------
-      # Fill these secrets in your repo settings if you want email alerts:
-      # SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFY_TO, NOTIFY_FROM
-      - name: Send failure email
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USER }}
-          password: ${{ secrets.SMTP_PASS }}
-          subject: "Codex review failed for PR #${{ github.event.pull_request.number }}"
-          to: ${{ secrets.NOTIFY_TO }}
-          from: ${{ secrets.NOTIFY_FROM }}
-          body: |
-            Codex review failed for PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
-            Workflow: ${{ github.workflow }}
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
