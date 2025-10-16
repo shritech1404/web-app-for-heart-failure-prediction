@@ -34,7 +34,7 @@ cv = KFold(n_splits=10, random_state=1, shuffle=True)
 scores = cross_val_score(LogisticRegression(), heart, target, scoring='accuracy', cv=cv, n_jobs=-1)
 acc = mean(scores)
 
-
+print("Heart_Disease")
 import pickle
 pickle.dump(model, open('heart.pkl', 'wb'))
 model=pickle.load(open('heart.pkl','rb'))
