@@ -2,65 +2,132 @@ name: Codex Automated Review Pipeline
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
-    branches:
-      - codexTest
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
 
 permissions:
   pull-requests: write
   contents: read
 
 jobs:
-  codex-review:
+  codex-automation:
+    name: Run Codex automated checks
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          fetch-depth: 0
 
-      - name: Setup Codex CLI via npm
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Codex CLI
         run: |
           npm install -g @openai/codex
-          # add npm global bin to PATH
-          echo "$(npm bin -g)" >> $GITHUB_PATH
+          echo "$(npm bin -g)" >> "$GITHUB_PATH"
 
-      - name: Debug codex installation
-        run: |
-          which codex || echo "codex not installed"
-          codex --version
-
-      - name: Run codex review
+      - name: Codex code review
         id: review
+        continue-on-error: true
         run: |
-          @codex review
+          set -o pipefail
+          codex review > codex-review.log 2>&1
+          exit_code=$?
+          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
+          cat codex-review.log >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
 
-      - name: Update documentation / README
+      - name: Codex vulnerability scan
+        id: vulnerabilities
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          codex scan vulnerabilities > codex-vulnerabilities.log 2>&1
+          exit_code=$?
+          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
+          cat codex-vulnerabilities.log >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
+
+      - name: Codex documentation update check
         id: docs
+        continue-on-error: true
         run: |
-          codex update-docs
+          set -o pipefail
+          codex update-docs > codex-docs.log 2>&1
+          exit_code=$?
+          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
+          cat codex-docs.log >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
 
-      - name: Check vulnerabilities
-        id: vuln
+      - name: Codex review summary
+        id: review_summary
+        continue-on-error: true
         run: |
-          codex scan vulnerabilities
+          set -o pipefail
+          summary_command="codex review --summary"
+          $summary_command > codex-summary.log 2>&1
+          exit_code=$?
+          if [ "$exit_code" -ne 0 ]; then
+            summary_command="codex summary"
+            codex summary >> codex-summary.log 2>&1
+            exit_code=$?
+          fi
+          echo "command=$summary_command" >> "$GITHUB_OUTPUT"
+          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
+          cat codex-summary.log >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
 
-      - name: Performance summary
-        id: perf
-        run: |
-          codex perf-summary
-
-      - name: Post summary comment
+      - name: Post Codex automation summary
         if: always()
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## Codex Automated Review Summary  
-            **Review step**: ${{ steps.review.outcome }}  
-            **Docs update**: ${{ steps.docs.outcome }}  
-            **Vulnerability scan**: ${{ steps.vuln.outcome }}  
-            **Performance summary**: ${{ steps.perf.outcome }}  
-            
-            _If any step failed, subsequent checks were skipped._
+            ## Codex Automated Review Summary
+            **Code review**: ${{ steps.review.outcome }}
+            **Vulnerability scan**: ${{ steps.vulnerabilities.outcome }}
+            **Documentation update**: ${{ steps.docs.outcome }}
+            **Review summary**: ${{ steps.review_summary.outcome }}
+
+            <details>
+            <summary>Code review output</summary>
+
+            ```
+            ${{ steps.review.outputs.log }}
+            ```
+            </details>
+
+            <details>
+            <summary>Vulnerability scan output</summary>
+
+            ```
+            ${{ steps.vulnerabilities.outputs.log }}
+            ```
+            </details>
+
+            <details>
+            <summary>Documentation update output</summary>
+
+            ```
+            ${{ steps.docs.outputs.log }}
+            ```
+            </details>
+
+            <details>
+            <summary>Review summary output (${{ steps.review_summary.outputs.command }})</summary>
+
+            ```
+            ${{ steps.review_summary.outputs.log }}
+            ```
+            </details>
