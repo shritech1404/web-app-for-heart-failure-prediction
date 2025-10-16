@@ -33,7 +33,7 @@ jobs:
       - name: Run codex review
         id: review
         run: |
-          codex review
+          @codex review
 
       - name: Update documentation / README
         id: docs
