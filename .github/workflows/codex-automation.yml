@@ -1,90 +1,154 @@
-name: Codex Automated Review Pipeline
+name: Codex Comment Triggers
 
 on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  workflow_dispatch:
 
 permissions:
+  contents: write
   pull-requests: write
-  contents: read
+  issues: write
+
+concurrency:
+  group: codex-comment-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
 
 jobs:
-  codex-automation:
-    name: Run Codex automated checks
+  codex:
+    if: >
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
+      (github.event_name == 'pull_request_review_comment')
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Derive PR number + comment body
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "pr=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "body<<EOF" >> "$GITHUB_OUTPUT"
+            echo "${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "body<<EOF" >> "$GITHUB_OUTPUT"
+            echo "${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse @codex command
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `${{ steps.meta.outputs.body }}`.trim().toLowerCase();
+            const patterns = [
+              { key: 'run_all', re: /^\s*@codex\s+run\s+all\b/ },
+              { key: 'review', re: /^\s*@codex\s+review\b/ },
+              { key: 'docs', re: /^\s*@codex\s+(update\s+docs|docs|update\s+readme|readme)\b/ },
+              { key: 'vuln', re: /^\s*@codex\s+(scan\s+vulnerabilities|vulnerabilities|scan\s+deps|scan\s+dependencies)\b/ },
+              { key: 'perf', re: /^\s*@codex\s+(performance\s+summary|performance|perf)\b/ },
+            ];
+            const matched = patterns.find(p => p.re.test(body));
+            if (!matched) {
+              core.setOutput('recognized', 'false');
+              core.setOutput('cmd', '');
+            } else {
+              core.setOutput('recognized', 'true');
+              core.setOutput('cmd', matched.key);
+            }
+
+      - name: Exit if not an @codex command
+        if: steps.parse.outputs.recognized != 'true'
+        run: echo "No @codex command detected. Skipping."
+
+      - name: Checkout code
+        if: steps.parse.outputs.recognized == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Codex CLI
-        run: |
-          npm install -g @openai/codex
-          echo "$(npm bin -g)" >> "$GITHUB_PATH"
-
-      - name: Codex code review
+      # ───────────────────────────────
+      # 1) CODE REVIEW
+      # ───────────────────────────────
+      - name: Run Codex code review
         id: review
-        continue-on-error: true
+        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'review')
         run: |
-          set -o pipefail
-          codex review > codex-review.log 2>&1
-          exit_code=$?
-          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
-          cat codex-review.log >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          exit "$exit_code"
+          set -e
+          mkdir -p .codex
+          ./codex review --format json --out .codex/review.json
+          ./codex review --format md --out .codex/review.md
 
-      - name: Codex vulnerability scan
-        id: vulnerabilities
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          codex scan vulnerabilities > codex-vulnerabilities.log 2>&1
-          exit_code=$?
-          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
-          cat codex-vulnerabilities.log >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          exit "$exit_code"
-
-      - name: Codex documentation update check
+      # ───────────────────────────────
+      # 2) DOCS / README
+      # ───────────────────────────────
+      - name: Check and update docs
         id: docs
-        continue-on-error: true
+        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'docs')
         run: |
-          set -o pipefail
-          codex update-docs > codex-docs.log 2>&1
-          exit_code=$?
-          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
-          cat codex-docs.log >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          exit "$exit_code"
+          set -e
+          mkdir -p .codex
+          ./codex docs check --out .codex/docs-report.md
 
-      - name: Codex review summary
-        id: review_summary
-        continue-on-error: true
+      - name: Auto-commit README/doc updates
+        if: always() && steps.docs.conclusion == 'success'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(docs): auto-update README via Codex"
+          file_pattern: |
+            README.md
+            docs/**
+          commit_user_name: codex-bot
+          commit_user_email: codex-bot@example.com
+          push_options: --force-with-lease
+
+      # ───────────────────────────────
+      # 3) SECURITY / DEPENDENCY SCAN
+      # ───────────────────────────────
+      - name: Security & dependency scan
+        id: vuln
+        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'vuln')
         run: |
-          set -o pipefail
-          summary_command="codex review --summary"
-          $summary_command > codex-summary.log 2>&1
-          exit_code=$?
-          if [ "$exit_code" -ne 0 ]; then
-            summary_command="codex summary"
-            codex summary >> codex-summary.log 2>&1
-            exit_code=$?
-          fi
-          echo "command=$summary_command" >> "$GITHUB_OUTPUT"
-          echo "log<<'EOF'" >> "$GITHUB_OUTPUT"
-          cat codex-summary.log >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          exit "$exit_code"
+          set -e
+          mkdir -p .codex
+          ./codex scan vulnerabilities --format sarif --out .codex/vuln.sarif
+          ./codex scan dependencies --format md --out .codex/deps.md
 
-     
+      # ───────────────────────────────
+      # 4) PERFORMANCE SUMMARY
+      # ───────────────────────────────
+      - name: Performance review summary
+        id: perf
+        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'perf')
+        run: |
+          set -e
+          mkdir -p .codex
+          ./codex review performance --format md --out .codex/perf.md
+
+      # ───────────────────────────────
+      # POST SUMMARY COMMENT
+      # ───────────────────────────────
+      - name: Post summary as PR comment
+        if: steps.parse.outputs.recognized == 'true'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ steps.meta.outputs.pr }}
+          body: |
+            ## 🤖 Codex Automated Run
+            **Command:** `${{ steps.parse.outputs.cmd }}`
+            **Job status:** **${{ job.status }}**
+
+            - Code review: ${{ steps.review.outcome || 'skipped' }}
+            - Docs/README: ${{ steps.docs.outcome || 'skipped' }}
+            - Security scan: ${{ steps.vuln.outcome || 'skipped' }}
+            - Performance: ${{ steps.perf.outcome || 'skipped' }}
+
+            _Triggered by comment:_
+            > ${{ steps.meta.outputs.body }}
