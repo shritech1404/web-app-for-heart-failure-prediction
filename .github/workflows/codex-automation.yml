@@ -122,29 +122,70 @@ jobs:
             echo "failure_reason=none" >> $GITHUB_OUTPUT
           fi
 
-      # Step 6: Post detailed comment on PR
-      - name: Post PR Comment
+      # Step 6: Post Code Review Result
+      - name: Post Code Review Result
+        if: always() && steps.review.outcome != 'skipped'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🔍 Code Review
+            **Status**: ${{ steps.review.outcome == 'success' && '✅ Passed' || '❌ Failed' }}
+            **Issues Found**: ${{ steps.review.outputs.issues_found || '0' }}
+            ${{ steps.review.outcome == 'failure' && '⚠️ Please fix the issues before proceeding.' || '' }}
+
+      # Step 7: Post Documentation Update Result
+      - name: Post Documentation Result
+        if: always() && steps.docs.outcome != 'skipped'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 📝 Documentation Update
+            **Status**: ${{ steps.docs.outcome == 'success' && '✅ Updated' || '❌ Failed' }}
+            **Details**: ${{ steps.docs.outputs.docs_status || 'Documentation check completed' }}
+
+      # Step 8: Post Vulnerability Scan Result
+      - name: Post Vulnerability Scan Result
+        if: always() && steps.vuln.outcome != 'skipped'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🔒 Security Vulnerability Scan
+            **Status**: ${{ steps.vuln.outcome == 'success' && '✅ Passed' || '⚠️ Vulnerabilities Found' }}
+            **Vulnerabilities**: ${{ steps.vuln.outputs.vulnerabilities_found || '0' }}
+            ${{ steps.vuln.outcome == 'failure' && '⚠️ Critical vulnerabilities detected. Please address them immediately.' || '' }}
+
+      # Step 9: Post Performance Analysis Result
+      - name: Post Performance Result
+        if: always() && steps.perf.outcome != 'skipped'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## ⚡ Performance Analysis
+            **Status**: ${{ steps.perf.outcome == 'success' && '✅ Analyzed' || '❌ Failed' }}
+            **Details**: ${{ steps.perf.outputs.perf_status || 'Performance check completed' }}
+
+      # Step 10: Post Final Summary
+      - name: Post Final Summary
         if: always()
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## 🤖 Codex Automated Review Summary
-            
-            | Check | Status | Details |
-            |-------|--------|---------|
-            | 🔍 Code Review | ${{ steps.review.outcome == 'success' && '✅ Passed' || '❌ Failed' }} | ${{ steps.review.outputs.issues_found || '0' }} issues found |
-            | 📝 Documentation | ${{ steps.docs.outcome == 'success' && '✅ Updated' || steps.docs.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} | ${{ steps.docs.outputs.docs_status || 'N/A' }} |
-            | 🔒 Security Scan | ${{ steps.vuln.outcome == 'success' && '✅ Passed' || steps.vuln.outcome == 'skipped' && '⏭️ Skipped' || '⚠️ Issues Found' }} | ${{ steps.vuln.outputs.vulnerabilities_found || '0' }} vulnerabilities |
-            | ⚡ Performance | ${{ steps.perf.outcome == 'success' && '✅ Analyzed' || steps.perf.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} | ${{ steps.perf.outputs.perf_status || 'N/A' }} |
-            
-            **Overall Status**: ${{ steps.results.outputs.overall_status == 'success' && '✅ All checks passed!' || '❌ Review failed' }}
-            
-            ${{ steps.results.outputs.failure_reason != 'none' && format('**Failure Reason**: {0}', steps.results.outputs.failure_reason) || '' }}
-            
             ---
-            *Automated by Codex Review Pipeline* • [View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            ## 🏁 Final Status
+            **Overall**: ${{ steps.results.outputs.overall_status == 'success' && '✅ All checks passed!' || '❌ Pipeline failed' }}
+            ${{ steps.results.outputs.failure_reason != 'none' && format('**Reason**: {0}', steps.results.outputs.failure_reason) || '' }}
+            
+            [View Full Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
       # Step 7: Fail the workflow if critical issues found
       - name: Final Status Check
