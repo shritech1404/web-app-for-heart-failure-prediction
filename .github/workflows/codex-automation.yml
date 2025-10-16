@@ -13,42 +13,43 @@ permissions:
 jobs:
   codex-review:
     runs-on: ubuntu-latest
+    env:
+      CODEX_QUIET_MODE: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
 
-      - name: Setup Codex CLI via npm
+      - name: Install Codex CLI
         run: |
           npm install -g @openai/codex
-          # add npm global bin to PATH
           echo "$(npm bin -g)" >> $GITHUB_PATH
 
-      - name: Debug codex installation
+      - name: Debug codex install
         run: |
-          which codex || echo "codex not installed"
-          codex --version
+          which codex
+          codex --version || true
 
-      - name: Run codex review
+      - name: Run codex review non-interactive
         id: review
         run: |
-          codex review
+          codex --no-terminal --quiet review
 
       - name: Update documentation / README
         id: docs
         run: |
-          codex update-docs
+          codex --no-terminal --quiet update-docs
 
       - name: Check vulnerabilities
         id: vuln
         run: |
-          codex scan vulnerabilities
+          codex --no-terminal --quiet scan vulnerabilities
 
       - name: Performance summary
         id: perf
         run: |
-          codex perf-summary
+          codex --no-terminal --quiet perf-summary
 
       - name: Post summary comment
         if: always()
@@ -62,5 +63,3 @@ jobs:
             **Docs update**: ${{ steps.docs.outcome }}  
             **Vulnerability scan**: ${{ steps.vuln.outcome }}  
             **Performance summary**: ${{ steps.perf.outcome }}  
-            
-            _If any step failed, subsequent checks were skipped._
