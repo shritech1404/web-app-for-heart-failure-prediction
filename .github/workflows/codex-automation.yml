@@ -34,7 +34,7 @@ jobs:
       - name: Run codex review non-interactive
         id: review
         run: |
-          codex --no-terminal --quiet review
+          codex exec "review code"
 
       - name: Update documentation / README
         id: docs
