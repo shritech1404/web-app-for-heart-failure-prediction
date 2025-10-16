@@ -87,47 +87,4 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
           exit "$exit_code"
 
-      - name: Post Codex automation summary
-        if: always()
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            ## Codex Automated Review Summary
-            **Code review**: ${{ steps.review.outcome }}
-            **Vulnerability scan**: ${{ steps.vulnerabilities.outcome }}
-            **Documentation update**: ${{ steps.docs.outcome }}
-            **Review summary**: ${{ steps.review_summary.outcome }}
-
-            <details>
-            <summary>Code review output</summary>
-
-            ```
-            ${{ steps.review.outputs.log }}
-            ```
-            </details>
-
-            <details>
-            <summary>Vulnerability scan output</summary>
-
-            ```
-            ${{ steps.vulnerabilities.outputs.log }}
-            ```
-            </details>
-
-            <details>
-            <summary>Documentation update output</summary>
-
-            ```
-            ${{ steps.docs.outputs.log }}
-            ```
-            </details>
-
-            <details>
-            <summary>Review summary output (${{ steps.review_summary.outputs.command }})</summary>
-
-            ```
-            ${{ steps.review_summary.outputs.log }}
-            ```
-            </details>
+      
