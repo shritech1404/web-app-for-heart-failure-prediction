@@ -7,8 +7,8 @@ on:
       - codexTest
 
 permissions:
-  pull-requests: write   # allow posting comments
-  contents: read          # for checkout, reading files
+  pull-requests: write
+  contents: read
 
 jobs:
   codex-review:
@@ -17,48 +17,39 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # ensure the head ref is checked out in PRs
           ref: ${{ github.head_ref }}
 
-      - name: Setup dependencies / environment
+      - name: Setup Codex CLI via npm
         run: |
-          python -m pip install --upgrade pip
-          # install codex-cli
-          pip install --user codex-cli
-          # add local bin to PATH
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          npm install -g @openai/codex
+          # add npm global bin to PATH
+          echo "$(npm bin -g)" >> $GITHUB_PATH
 
-      - name: Debug:show codex path
+      - name: Debug codex installation
         run: |
-          ls -al ~/.local/bin
-          which codex || echo "codex not in PATH"
+          which codex || echo "codex not installed"
           codex --version
 
-      # Step 1: Review code
       - name: Run codex review
         id: review
         run: |
           codex review
 
-      # Step 2: Update documentation / README
       - name: Update documentation / README
         id: docs
         run: |
           codex update-docs
 
-      # Step 3: Check vulnerabilities
       - name: Check vulnerabilities
         id: vuln
         run: |
           codex scan vulnerabilities
 
-      # Step 4: Performance / summary review
       - name: Performance summary
         id: perf
         run: |
           codex perf-summary
 
-      # Step 5: Post summary comment on the PR
       - name: Post summary comment
         if: always()
         uses: peter-evans/create-or-update-comment@v4
@@ -72,5 +63,4 @@ jobs:
             **Vulnerability scan**: ${{ steps.vuln.outcome }}  
             **Performance summary**: ${{ steps.perf.outcome }}  
             
-            _If any step failed, subsequent checks would not run._
-
+            _If any step failed, subsequent checks were skipped._
