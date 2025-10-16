@@ -1,120 +1,73 @@
-name: Codex Automation
+name: Codex Automated Review Pipeline
 
 on:
-  push:
-    branches: [ codexTest ]
   pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - codexTest
+
+permissions:
+  pull-requests: write
+  contents: read
 
 jobs:
-  codex_pipeline:
-    name: Run Codex automation pipeline
+  codex-review:
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
-      - name: Check out repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Determine base revision
-        id: base
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "base_ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            echo "base_ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
-          else
-            git fetch --no-tags --depth=1 origin "${{ github.event.repository.default_branch }}"
-            echo "base_ref=origin/${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run codex command
-        run: |
-          set -euo pipefail
-          if command -v codex >/dev/null 2>&1; then
-            codex review
-          else
-            echo "::warning::codex command not found on runner; skipping automated review."
-          fi
-
-      - name: Verify documentation updates
-        run: |
-          set -euo pipefail
-          BASE_REF="${{ steps.base.outputs.base_ref }}"
-          if [ -z "$BASE_REF" ]; then
-            echo "::warning::Unable to determine base revision for documentation check."
-            exit 0
-          fi
-          CHANGED=$(git diff --name-only "$BASE_REF"..HEAD || true)
-          if echo "$CHANGED" | grep -E '\\.(py|ipynb|R|js)$' >/dev/null 2>&1; then
-            if ! echo "$CHANGED" | grep -q '^README.md$'; then
-              echo "::warning::Application code changed without accompanying README update."
-            else
-              echo "Documentation update detected alongside code changes."
-            fi
-          else
-            echo "No tracked application code changes detected; skipping documentation check."
-          fi
-
-      - name: Run dependency vulnerability scan
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pip-audit
-          if [ -f requirements.txt ]; then
-            pip-audit -r requirements.txt
-          else
-            echo "::warning::requirements.txt not found; skipping pip-audit."
-          fi
-
-      - name: Generate performance review summary
-        run: |
-          python - <<'PY'
-import json
-import pathlib
-import statistics
-from collections import Counter
-
-source_files = []
-for path in pathlib.Path('.').rglob('*.py'):
-    if path.parts and path.parts[0] == '.git':
-        continue
-    try:
-        text = path.read_text(encoding='utf-8')
-    except UnicodeDecodeError:
-        continue
-    line_count = len(text.splitlines())
-    source_files.append({"file": str(path), "lines": line_count})
-
-if not source_files:
-    print("No Python files discovered for performance summary.")
-else:
-    total_lines = sum(item["lines"] for item in source_files)
-    avg_lines = total_lines / len(source_files)
-    print("Performance summary (heuristic based on file sizes):")
-    print(f"- Python files analyzed: {len(source_files)}")
-    print(f"- Total lines of Python code: {total_lines}")
-    print(f"- Average lines per file: {avg_lines:.1f}")
-    largest = max(source_files, key=lambda item: item["lines"])
-    print(f"- Largest file: {largest['file']} ({largest['lines']} lines)")
-PY
-
-      - name: Email maintainers on failure
-        if: failure() && secrets.MAIL_SERVER != ''
-        uses: dawidd6/action-send-mail@v3
         with:
-          server_address: ${{ secrets.MAIL_SERVER }}
-          server_port: ${{ secrets.MAIL_PORT }}
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "Codex automation pipeline failed for ${{ github.repository }}"
-          to: ${{ secrets.MAIL_TO }}
-          from: Codex Automation <${{ secrets.MAIL_FROM }}>
-          body: |
-            The Codex automation workflow failed for ${{ github.repository }} on ref ${{ github.ref }}.
-            Review the workflow run for detailed logs.
+          ref: ${{ github.head_ref }}
 
-      - name: Note missing email configuration
-        if: failure() && secrets.MAIL_SERVER == ''
+      - name: Install Codex CLI via npm
         run: |
-          echo "::warning::Workflow failed but email settings are not configured. Set MAIL_SERVER and related secrets to enable notifications."
+          npm install -g @openai/codex
+          echo "$(npm bin -g)" >> $GITHUB_PATH
+
+      - name: Debug codex installation
+        run: |
+          which codex || echo "codex not installed"
+          codex --version || true
+
+      # Step 1: Review code (non-interactive)
+      - name: Run codex review (exec mode)
+        id: review
+        run: |
+          codex exec "review code"
+
+      # Step 2: Update documentation / README
+      - name: Update documentation / README
+        id: docs
+        run: |
+          codex exec "update documentation based on changes"
+
+      # Step 3: Check vulnerabilities
+      - name: Check vulnerabilities
+        id: vuln
+        run: |
+          codex exec "scan vulnerabilities"
+
+      # Step 4: Performance / summary review
+      - name: Performance summary
+        id: perf
+        run: |
+          codex exec "give performance summary"
+
+      # Step 5: Post summary comment on the PR
+      - name: Post summary comment
+        if: always()
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## Codex Automated Review Summary  
+            **Review step**: ${{ steps.review.outcome }}  
+            **Docs update**: ${{ steps.docs.outcome }}  
+            **Vulnerability scan**: ${{ steps.vuln.outcome }}  
+            **Performance summary**: ${{ steps.perf.outcome }}  
+            
+            _If any step failed, subsequent checks would not run._
+
