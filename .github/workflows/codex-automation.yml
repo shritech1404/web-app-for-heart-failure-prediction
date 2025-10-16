@@ -7,8 +7,8 @@ on:
       - codexTest
 
 permissions:
-  pull-requests: write   # needed to post comments
-  contents: read          # needed for checkout and reading files
+  pull-requests: write   # allow posting comments
+  contents: read          # for checkout, reading files
 
 jobs:
   codex-review:
@@ -16,58 +16,61 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # ensure the head ref is checked out in PRs
+          ref: ${{ github.head_ref }}
 
-      - name: Setup dependencies
-        run: |
-          # install required dependencies / build tools
-          # e.g. npm install, pip install, etc.
-          echo "Setup project dependencies …"
-
-      - name: Install Codex CLI
+      - name: Setup dependencies / environment
         run: |
           python -m pip install --upgrade pip
+          # install codex-cli
           pip install --user codex-cli
-          ln -sf "$HOME/.local/bin/codex" ./codex
+          # add local bin to PATH
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Debug:show codex path
+        run: |
+          ls -al ~/.local/bin
+          which codex || echo "codex not in PATH"
+          codex --version
 
       # Step 1: Review code
       - name: Run codex review
         id: review
         run: |
-          ./codex review
-        # If this exits non-zero, the job fails and subsequent steps won’t run
+          codex review
 
       # Step 2: Update documentation / README
       - name: Update documentation / README
         id: docs
         run: |
-          ./codex update-docs
-        # This runs only if review succeeded
+          codex update-docs
 
       # Step 3: Check vulnerabilities
       - name: Check vulnerabilities
         id: vuln
         run: |
-          ./codex scan vulnerabilities
+          codex scan vulnerabilities
 
       # Step 4: Performance / summary review
       - name: Performance summary
         id: perf
         run: |
-          ./codex perf-summary
+          codex perf-summary
 
       # Step 5: Post summary comment on the PR
       - name: Post summary comment
-        if: always()  # so it runs even if some step failed
+        if: always()
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## ✅ Codex Automated Review Summary  
+            ## Codex Automated Review Summary  
             **Review step**: ${{ steps.review.outcome }}  
             **Docs update**: ${{ steps.docs.outcome }}  
             **Vulnerability scan**: ${{ steps.vuln.outcome }}  
             **Performance summary**: ${{ steps.perf.outcome }}  
             
-            *If any step failed, subsequent checks were skipped.*
+            _If any step failed, subsequent checks would not run._
 
