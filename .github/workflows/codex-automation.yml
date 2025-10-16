@@ -1,154 +1,42 @@
-name: Codex Comment Triggers
+name: Codex Automated Review
 
 on:
-  issue_comment:
-    types: [created, edited]
-  pull_request_review_comment:
-    types: [created, edited]
-  workflow_dispatch:
-
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-
-concurrency:
-  group: codex-comment-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
-env:
-  PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+  pull_request:
+    branches:
+      - codexNew
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 jobs:
-  codex:
-    if: >
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
-      (github.event_name == 'pull_request_review_comment')
+  codex-review:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Derive PR number + comment body
-        id: meta
-        run: |
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            echo "pr=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-            echo "body<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-          else
-            echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "body<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Parse @codex command
-        id: parse
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `${{ steps.meta.outputs.body }}`.trim().toLowerCase();
-            const patterns = [
-              { key: 'run_all', re: /^\s*@codex\s+run\s+all\b/ },
-              { key: 'review', re: /^\s*@codex\s+review\b/ },
-              { key: 'docs', re: /^\s*@codex\s+(update\s+docs|docs|update\s+readme|readme)\b/ },
-              { key: 'vuln', re: /^\s*@codex\s+(scan\s+vulnerabilities|vulnerabilities|scan\s+deps|scan\s+dependencies)\b/ },
-              { key: 'perf', re: /^\s*@codex\s+(performance\s+summary|performance|perf)\b/ },
-            ];
-            const matched = patterns.find(p => p.re.test(body));
-            if (!matched) {
-              core.setOutput('recognized', 'false');
-              core.setOutput('cmd', '');
-            } else {
-              core.setOutput('recognized', 'true');
-              core.setOutput('cmd', matched.key);
-            }
-
-      - name: Exit if not an @codex command
-        if: steps.parse.outputs.recognized != 'true'
-        run: echo "No @codex command detected. Skipping."
-
       - name: Checkout code
-        if: steps.parse.outputs.recognized == 'true'
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ───────────────────────────────
-      # 1) CODE REVIEW
-      # ───────────────────────────────
-      - name: Run Codex code review
-        id: review
-        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'review')
+      - name: Run lint / style checks
         run: |
-          set -e
-          mkdir -p .codex
-          ./codex review --format json --out .codex/review.json
-          ./codex review --format md --out .codex/review.md
+          # your codex lint command
+          ./codex lint
+        # this will stop if exit code ≠ 0
 
-      # ───────────────────────────────
-      # 2) DOCS / README
-      # ───────────────────────────────
-      - name: Check and update docs
-        id: docs
-        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'docs')
+      - name: Check vulnerabilities / dependencies
         run: |
-          set -e
-          mkdir -p .codex
-          ./codex docs check --out .codex/docs-report.md
+          ./codex scan vulnerabilities
+        # fails if vulnerabilities found
 
-      - name: Auto-commit README/doc updates
-        if: always() && steps.docs.conclusion == 'success'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore(docs): auto-update README via Codex"
-          file_pattern: |
-            README.md
-            docs/**
-          commit_user_name: codex-bot
-          commit_user_email: codex-bot@example.com
-          push_options: --force-with-lease
-
-      # ───────────────────────────────
-      # 3) SECURITY / DEPENDENCY SCAN
-      # ───────────────────────────────
-      - name: Security & dependency scan
-        id: vuln
-        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'vuln')
+      - name: Ensure README / docs updated
         run: |
-          set -e
-          mkdir -p .codex
-          ./codex scan vulnerabilities --format sarif --out .codex/vuln.sarif
-          ./codex scan dependencies --format md --out .codex/deps.md
+          ./codex check-readme
+        # fail if checks not satisfied
 
-      # ───────────────────────────────
-      # 4) PERFORMANCE SUMMARY
-      # ───────────────────────────────
-      - name: Performance review summary
-        id: perf
-        if: steps.parse.outputs.recognized == 'true' && (steps.parse.outputs.cmd == 'run_all' || steps.parse.outputs.cmd == 'perf')
-        run: |
-          set -e
-          mkdir -p .codex
-          ./codex review performance --format md --out .codex/perf.md
-
-      # ───────────────────────────────
-      # POST SUMMARY COMMENT
-      # ───────────────────────────────
-      - name: Post summary as PR comment
-        if: steps.parse.outputs.recognized == 'true'
+      - name: Post summary comment
+        if: always()
         uses: peter-evans/create-or-update-comment@v3
         with:
-          issue-number: ${{ steps.meta.outputs.pr }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## 🤖 Codex Automated Run
-            **Command:** `${{ steps.parse.outputs.cmd }}`
-            **Job status:** **${{ job.status }}**
-
-            - Code review: ${{ steps.review.outcome || 'skipped' }}
-            - Docs/README: ${{ steps.docs.outcome || 'skipped' }}
-            - Security scan: ${{ steps.vuln.outcome || 'skipped' }}
-            - Performance: ${{ steps.perf.outcome || 'skipped' }}
-
-            _Triggered by comment:_
-            > ${{ steps.meta.outputs.body }}
+            ${{ job.status == 'success' && '✅ All checks passed' || '❌ Some checks failed' }}
