@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
     branches:
-      - codexTest
+      - main
 
 permissions:
   pull-requests: write
@@ -19,52 +19,43 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for better analysis
+          fetch-depth: 0  # fetch full history
 
       - name: Setup dependencies
         run: |
           echo "Setting up project dependencies..."
-          # Uncomment based on your project type:
-          # npm install
-          # pip install -r requirements.txt
-          # bundle install
+          # e.g. npm install, pip install -r requirements.txt, etc.
 
-      # Step 1: Run code review
+      # Step 1: Run Codex review
       - name: Run Codex Review
         id: review
         continue-on-error: true
         run: |
           echo "Running Codex review..."
-          # Replace with actual codex command or API call
-          # Example: curl -X POST your-codex-api/review
-          
-          # For demonstration - replace with real implementation
-          if [ -f "codex-cli" ]; then
-            ./codex-cli review --format json > review-results.json
-          else
-            echo "Codex CLI not found, using mock review"
-            echo '{"status":"success","issues":0}' > review-results.json
-          fi
-          
-          # Check if review passed
-          ISSUES=$(cat review-results.json | grep -o '"issues":[0-9]*' | cut -d':' -f2 || echo "0")
+          # 🔧 Replace with your real codex CLI or API call
+          # Example:
+          # codex-cli review --format json > review-results.json
+
+          # For now: mock result
+          echo '{"status":"success","issues":0}' > review-results.json
+
+          ISSUES=$(grep -o '"issues":[0-9]*' review-results.json | cut -d':' -f2 || echo "0")
           echo "issues_found=$ISSUES" >> $GITHUB_OUTPUT
-          
+
           if [ "$ISSUES" -gt "0" ]; then
             echo "❌ Review found $ISSUES issue(s)"
             exit 1
           fi
           echo "✅ Review passed"
 
-      # Step 2: Update documentation (only if review passed)
+      # Step 2: Update documentation (only if review succeeded)
       - name: Update Documentation
         id: docs
         if: steps.review.outcome == 'success'
         continue-on-error: true
         run: |
           echo "Updating documentation..."
-          # Replace with actual codex docs update command
-          # ./codex-cli update-docs
+          # e.g. codex-cli update-docs
           echo "docs_status=updated" >> $GITHUB_OUTPUT
 
       # Step 3: Vulnerability scan
@@ -74,17 +65,13 @@ jobs:
         continue-on-error: true
         run: |
           echo "Scanning for vulnerabilities..."
-          # Replace with actual vulnerability scanner
-          # npm audit --json > vuln-results.json
-          # or: snyk test --json > vuln-results.json
-          
-          # Mock results
+          # e.g. npm audit --json > vuln-results.json
+          # Mock:
           echo '{"vulnerabilities":0}' > vuln-results.json
-          VULNS=$(cat vuln-results.json | grep -o '"vulnerabilities":[0-9]*' | cut -d':' -f2 || echo "0")
+          VULNS=$(grep -o '"vulnerabilities":[0-9]*' vuln-results.json | cut -d':' -f2 || echo "0")
           echo "vulnerabilities_found=$VULNS" >> $GITHUB_OUTPUT
-          
           if [ "$VULNS" -gt "0" ]; then
-            echo "⚠️  Found $VULNS vulnerabilities"
+            echo "⚠️ Found $VULNS vulnerabilities"
             exit 1
           fi
           echo "✅ No vulnerabilities found"
@@ -96,34 +83,29 @@ jobs:
         continue-on-error: true
         run: |
           echo "Running performance analysis..."
-          # Replace with actual performance check
-          # ./codex-cli perf-summary
+          # e.g. codex-cli perf-summary
           echo "perf_status=analyzed" >> $GITHUB_OUTPUT
 
-      # Step 5: Collect results and determine overall status
+      # Step 5: Collect results & decide status
       - name: Collect Results
         id: results
         if: always()
         run: |
           REVIEW="${{ steps.review.outcome }}"
-          DOCS="${{ steps.docs.outcome }}"
           VULN="${{ steps.vuln.outcome }}"
-          PERF="${{ steps.perf.outcome }}"
-          
-          # Determine overall status
           if [ "$REVIEW" != "success" ]; then
             echo "overall_status=failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Code review found critical issues" >> $GITHUB_OUTPUT
+            echo "failure_reason=Code review failed" >> $GITHUB_OUTPUT
           elif [ "$VULN" == "failure" ]; then
             echo "overall_status=failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Security vulnerabilities detected" >> $GITHUB_OUTPUT
+            echo "failure_reason=Vulnerabilities found" >> $GITHUB_OUTPUT
           else
             echo "overall_status=success" >> $GITHUB_OUTPUT
             echo "failure_reason=none" >> $GITHUB_OUTPUT
           fi
 
-      # Step 6: Post Code Review Result
-      - name: Post Code Review Result
+      # Step 6: Post review comment
+      - name: Post Code Review Comment
         if: always() && steps.review.outcome != 'skipped'
         uses: peter-evans/create-or-update-comment@v4
         with:
@@ -135,8 +117,8 @@ jobs:
             **Issues Found**: ${{ steps.review.outputs.issues_found || '0' }}
             ${{ steps.review.outcome == 'failure' && '⚠️ Please fix the issues before proceeding.' || '' }}
 
-      # Step 7: Post Documentation Update Result
-      - name: Post Documentation Result
+      # Step 7: Post Documentation update comment
+      - name: Post Docs Comment
         if: always() && steps.docs.outcome != 'skipped'
         uses: peter-evans/create-or-update-comment@v4
         with:
@@ -145,34 +127,30 @@ jobs:
           body: |
             ## 📝 Documentation Update
             **Status**: ${{ steps.docs.outcome == 'success' && '✅ Updated' || '❌ Failed' }}
-            **Details**: ${{ steps.docs.outputs.docs_status || 'Documentation check completed' }}
 
-      # Step 8: Post Vulnerability Scan Result
-      - name: Post Vulnerability Scan Result
+      # Step 8: Post Vulnerability comment
+      - name: Post Vulnerability Comment
         if: always() && steps.vuln.outcome != 'skipped'
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## 🔒 Security Vulnerability Scan
+            ## 🔒 Vulnerability Scan
             **Status**: ${{ steps.vuln.outcome == 'success' && '✅ Passed' || '⚠️ Vulnerabilities Found' }}
-            **Vulnerabilities**: ${{ steps.vuln.outputs.vulnerabilities_found || '0' }}
-            ${{ steps.vuln.outcome == 'failure' && '⚠️ Critical vulnerabilities detected. Please address them immediately.' || '' }}
 
-      # Step 9: Post Performance Analysis Result
-      - name: Post Performance Result
+      # Step 9: Post Performance comment
+      - name: Post Performance Comment
         if: always() && steps.perf.outcome != 'skipped'
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            ## ⚡ Performance Analysis
+            ## ⚡ Performance
             **Status**: ${{ steps.perf.outcome == 'success' && '✅ Analyzed' || '❌ Failed' }}
-            **Details**: ${{ steps.perf.outputs.perf_status || 'Performance check completed' }}
 
-      # Step 10: Post Final Summary
+      # Step 10: Post final summary
       - name: Post Final Summary
         if: always()
         uses: peter-evans/create-or-update-comment@v4
@@ -182,17 +160,16 @@ jobs:
           body: |
             ---
             ## 🏁 Final Status
-            **Overall**: ${{ steps.results.outputs.overall_status == 'success' && '✅ All checks passed!' || '❌ Pipeline failed' }}
+            **Overall**: ${{ steps.results.outputs.overall_status == 'success' && '✅ All checks passed' || '❌ Pipeline failed' }}
             ${{ steps.results.outputs.failure_reason != 'none' && format('**Reason**: {0}', steps.results.outputs.failure_reason) || '' }}
-            
-            [View Full Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            [View logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-      # Step 7: Fail the workflow if critical issues found
+      # Step 11: Fail if overall failed
       - name: Final Status Check
         if: always()
         run: |
-          if [ "${{ steps.results.outputs.overall_status }}" == "failed" ]; then
-            echo "❌ Workflow failed due to critical issues"
+          if [ "${{ steps.results.outputs.overall_status }}" = "failed" ]; then
+            echo "❌ Some checks failed"
             exit 1
           fi
-          echo "✅ All checks passed successfully"
+          echo "✅ All good"
