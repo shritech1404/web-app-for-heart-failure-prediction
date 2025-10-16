@@ -13,47 +13,40 @@ permissions:
 jobs:
   codex-review:
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
 
-      - name: Install Codex CLI via npm
+      - name: Install Codex CLI
         run: |
           npm install -g @openai/codex
           echo "$(npm bin -g)" >> $GITHUB_PATH
 
-      - name: Debug codex installation
+      - name: Perform interactive login and upload credentials
+        id: login
         run: |
-          which codex || echo "codex not installed"
-          codex --version || true
+          # This step fails in CI, but you can run it locally first,
+          # get the auth.json, and commit or store it in GitHub secrets/storage.
+          codex login
+        # This step is likely not automatable in CI.
 
-      # Step 1: Review code (non-interactive)
-      - name: Run codex review (exec mode)
+      - name: Load saved auth.json (if exists)
+        run: |
+          mkdir -p ~/.codex
+          # e.g. restore from secret or artifact
+          echo "${{ secrets.CODEX_AUTH_JSON_BASE64 }}" | base64 -d > ~/.codex/auth.json
+
+      - name: Debug login status
+        run: |
+          codex login status
+          codex whoami
+
+      - name: Run review
         id: review
         run: |
           codex exec "review code"
-
-      # Step 2: Update documentation / README
-      - name: Update documentation / README
-        id: docs
-        run: |
-          codex exec "update documentation based on changes"
-
-      # Step 3: Check vulnerabilities
-      - name: Check vulnerabilities
-        id: vuln
-        run: |
-          codex exec "scan vulnerabilities"
-
-      # Step 4: Performance / summary review
-      - name: Performance summary
-        id: perf
-        run: |
-          codex exec "give performance summary"
 
       # Step 5: Post summary comment on the PR
       - name: Post summary comment
