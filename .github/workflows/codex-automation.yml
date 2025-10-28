@@ -1,0 +1,285 @@
+name: Codex PR Review (Repo-wide + Docs Auto-Update)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write        # <-- needed to commit README.md
+  pull-requests: write
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+
+    env:
+      CODEX_MODEL: gpt-4o-mini
+      AZURE_OPENAI_API_VERSION: preview
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install Codex CLI
+        run: npm i -g @openai/codex
+
+      - name: Configure Codex (Azure OpenAI)
+        run: |
+          mkdir -p ~/.codex
+          cat > ~/.codex/config.toml <<'EOF'
+          model = "${{ env.CODEX_MODEL }}"
+          model_provider = "azure"
+          approval_policy = "on-request"
+          model_reasoning_summary = "detailed"
+          model_reasoning_effort = "high"
+
+          [model_providers.azure]
+          name = "Azure"
+          base_url = "${{ secrets.AZURE_OPENAI_ENDPOINT }}/openai/v1"
+          http_headers = { "api-key" = "${{ secrets.AZURE_OPENAI_API_KEY }}" }
+          wire_api = "responses"
+          query_params = { api-version = "${{ env.AZURE_OPENAI_API_VERSION }}" }
+          EOF
+
+      # ---------- INVENTORY + DIFF (repo-wide + deletions) ----------
+      - name: Build repo inventory + deletions + diff
+        id: inv
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # All tracked files in repo
+          git ls-files > all_files.txt
+
+          # Code allow-list
+          CODE=$(cat all_files.txt | \
+            grep -E '\.(c|cc|cpp|cxx|h|hpp|hh|m|mm|cs|go|java|kt|kts|ts|tsx|js|jsx|py|rb|rs|php|swift|scala|lua|pl|erl|ex|exs|r|sql|sh|bash|ps1|dart|vue|svelte|cmake|mk|Makefile|gradle|groovy|zig)$' || true)
+
+          CODE=$(echo "$CODE" | \
+            grep -Ev '(^|/)\.github/|(^|/)node_modules/|(^|/)(dist|build|out|coverage|vendor)($|/)' | \
+            grep -Ev '\.(ya?ml|toml|ini|conf|json|lock|md|rst|txt|png|jpe?g|gif|svg|pdf|map|min\.js)$' || true)
+
+          printf "%s\n" $CODE > repo_code_files.txt || true
+
+          # Deleted files in PR (for breakage analysis)
+          git diff --name-status "$BASE...$HEAD" | awk '$1=="D"{print $2}' > deleted_files.txt || true
+
+          # Focused diff for changed code (context only)
+          CHANGED=$(git diff --name-only "$BASE...$HEAD" || true)
+          CHANGED_CODE=$(echo "$CHANGED" | grep -F -f repo_code_files.txt || true)
+          if [ -n "$CHANGED_CODE" ]; then
+            git --no-pager diff --unified=0 "$BASE...$HEAD" -- $CHANGED_CODE > changed_code.diff || true
+          else
+            : > changed_code.diff
+          fi
+
+          if [ -s repo_code_files.txt ]; then
+            echo "has_code=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_code=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ---------- REPO-WIDE CODE REVIEW (direct PR comment) ----------
+      - name: Prepare repo-wide review prompt
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        run: |
+          cat > review_task.txt << 'PROMPT'
+          You are Codex running in CI on a GitHub Pull Request.
+
+          GOAL:
+          Review the ENTIRE repository source code (not just the diff) and produce a single Markdown report to STDOUT.
+
+          MUST INCLUDE (in this order):
+          1) Summary
+          2) Deleted Files & Potential Breakages (use deleted_files.txt; name dependents and fixes)
+          3) Vulnerabilities (file + lines, evidence, severity, concrete fix)
+          4) Performance (file + lines, before/after snippets)
+          5) Hardcoded Secrets (file + lines, obfuscated values, remediation)
+          6) Code Duplication (file pairs/regions + refactor plan)
+          7) Changed Code (use changed_code.diff for context, but review is repo-wide)
+
+          INPUTS:
+          - repo_code_files.txt
+          - deleted_files.txt
+          - changed_code.diff
+          - You may open and read repo files.
+
+          CONSTRAINTS:
+          - Be specific and actionable with file paths/line numbers.
+          - Use small patch-style code blocks where helpful.
+          - If uncertain, say "Likely" and explain.
+
+          OUTPUT:
+          - Print the final Markdown report to STDOUT only (no files).
+          PROMPT
+
+      - name: Run Codex review (repo-wide, no file)
+        id: codex_review
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REVIEW="$(codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow review_task.txt. $(cat review_task.txt)")" || true
+          if [ -z "$REVIEW" ]; then
+            REVIEW=":warning: Codex ran but produced no review output. Check CI logs."
+          fi
+          MAX=120000
+          if [ ${#REVIEW} -gt $MAX ]; then
+            REVIEW="${REVIEW:0:$MAX}\n\n… _(truncated)_"
+          fi
+          {
+            echo 'body<<EOF'
+            echo "$REVIEW"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post code review comment to PR
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          REVIEW_BODY_JSON: ${{ toJson(steps.codex_review.outputs.body) }}
+        with:
+          script: |
+            const body = JSON.parse(process.env.REVIEW_BODY_JSON || '""').trim() || ":warning: Codex output was empty.";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
+
+      - name: Skip – no code files in repo
+        if: ${{ steps.inv.outputs.has_code != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: ":white_check_mark: No code files found to review (non-code repo or everything excluded)."
+            });
+
+      # ---------- README CREATION/UPDATE (auto-docs) ----------
+      - name: Prepare README generation prompt
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        run: |
+          cat > readme_task.txt << 'PROMPT'
+          You are Codex helping to create or update README.md for this repository.
+
+          GOAL:
+          - If README.md does not exist: generate a complete README.md.
+          - If it exists: regenerate a full, updated README.md reflecting current codebase and PR changes.
+
+          CONTENT REQUIREMENTS (in order):
+          1) Project title & short description
+          2) Quick start (install, build/run/test)
+          3) Configuration & environment variables (redact secrets; show sample .env)
+          4) Usage examples / API (public interfaces, CLI commands, endpoints, major modules)
+          5) Security notes (known limitations, safe handling of secrets)
+          6) Performance tips (caching, flags, batch sizes, hardware notes)
+          7) Troubleshooting (common errors, especially those likely from deleted files)
+          8) Changelog section: "Changes in PR #${{ github.event.pull_request.number }}" summarizing impact
+          9) Contributing & license
+
+          INPUTS:
+          - repo_code_files.txt (all code files)
+          - deleted_files.txt (files removed in this PR)
+          - changed_code.diff (context for this PR)
+          - You may open and read repo files.
+
+          CONSTRAINTS:
+          - Write valid Markdown.
+          - Do NOT include private keys, real tokens, or full secrets; use placeholders.
+          - Prefer accurate commands for this repo (framework/build tool detection).
+          - Reflect actual file paths and module names.
+
+          OUTPUT:
+          - Print the entire README.md content to STDOUT only (no extra prose).
+          PROMPT
+
+      - name: Generate README content with Codex
+        id: gen_readme
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          README_CONTENT="$(codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow readme_task.txt. $(cat readme_task.txt)")" || true
+          if [ -z "$README_CONTENT" ]; then
+            README_CONTENT="# Project\n\n_This README was auto-generated but Codex returned no details. Please fill in manually._"
+          fi
+          # Write candidate README to a temp file
+          echo "$README_CONTENT" > README.candidate.md
+
+      - name: Create or update README.md
+        id: write_readme
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f README.md ]; then
+            mv README.candidate.md README.md
+            git add README.md
+            git commit -m "docs: create README via Codex [skip ci]"
+            (git push origin "HEAD:${HEAD_REF}" && echo "pushed=true" >> $GITHUB_OUTPUT) || echo "pushed=false" >> $GITHUB_OUTPUT
+          else
+            # If README changed, overwrite and commit
+            if ! diff -q README.md README.candidate.md >/dev/null 2>&1; then
+              mv README.candidate.md README.md
+              git add README.md
+              git commit -m "docs: update README via Codex [skip ci]"
+              (git push origin "HEAD:${HEAD_REF}" && echo "pushed=true" >> $GITHUB_OUTPUT) || echo "pushed=false" >> $GITHUB_OUTPUT
+            else
+              echo "pushed=unchanged" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: If README push failed or unchanged, post README as PR comment
+        if: ${{ steps.inv.outputs.has_code == 'true' && (steps.write_readme.outputs.pushed == 'false' || steps.write_readme.outputs.pushed == 'unchanged') }}
+        uses: actions/github-script@v7
+        env:
+          README_BODY_JSON: ${{ toJson(steps.gen_readme.outputs) }}
+        with:
+          script: |
+            // When we can't push (fork PR) or README identical, post a comment offering the generated README.
+            // The candidate content isn't in outputs by default; re-read file from workspace using fs.
+            const fs = require('fs');
+            let body = '';
+            try {
+              body = fs.readFileSync('README.candidate.md', 'utf8');
+              // avoid huge comments
+              if (body.length > 120000) body = body.slice(0, 120000) + "\n\n… _(truncated)_";
+            } catch {
+              body = "_Unable to read generated README from workspace._";
+            }
+
+            const header = [
+              "### 📘 Proposed README update",
+              "",
+              "_Could not push to the PR branch (likely a fork) **or** README was unchanged._",
+              "Copy the content below into **README.md** if you want to apply it:",
+              "",
+              "```markdown",
+            ].join("\n");
+
+            const footer = "\n```";
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: header + body + footer
+            });
+
