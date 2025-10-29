@@ -1,11 +1,11 @@
-name: Codex PR Review (Repo-wide + README Auto-Update)
+name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: write          # needed to push README updates
+  contents: read
   pull-requests: write
 
 jobs:
@@ -36,6 +36,7 @@ jobs:
           approval_policy = "on-request"
           model_reasoning_summary = "detailed"
           model_reasoning_effort = "high"
+
           [model_providers.azure]
           name = "Azure"
           base_url = "${{ secrets.AZURE_OPENAI_ENDPOINT }}/openai/v1"
@@ -44,7 +45,7 @@ jobs:
           query_params = { api-version = "${{ env.AZURE_OPENAI_API_VERSION }}" }
           EOF
 
-      # ---------- INVENTORY + DELETIONS + DIFF ----------
+      # Build a repo-wide inventory, note deletions, and also keep a focused diff for context.
       - name: Build repo inventory + deletions + diff
         id: inv
         shell: bash
@@ -54,22 +55,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          # All tracked files
+          # All tracked files in repo
           git ls-files > all_files.txt
 
-          # Allow-list common code extensions; exclude docs/assets/build/vendor/etc.
+          # Allow-list common code extensions; exclude docs/assets/vendor/build/etc.
           CODE=$(cat all_files.txt | \
             grep -E '\.(c|cc|cpp|cxx|h|hpp|hh|m|mm|cs|go|java|kt|kts|ts|tsx|js|jsx|py|rb|rs|php|swift|scala|lua|pl|erl|ex|exs|r|sql|sh|bash|ps1|dart|vue|svelte|cmake|mk|Makefile|gradle|groovy|zig)$' || true)
+
           CODE=$(echo "$CODE" | \
             grep -Ev '(^|/)\.github/|(^|/)node_modules/|(^|/)(dist|build|out|coverage|vendor)($|/)' | \
             grep -Ev '\.(ya?ml|toml|ini|conf|json|lock|md|rst|txt|png|jpe?g|gif|svg|pdf|map|min\.js)$' || true)
 
           printf "%s\n" $CODE > repo_code_files.txt || true
 
-          # Deleted files for breakage analysis
+          # Deleted files between base and head (important for breakage analysis)
           git diff --name-status "$BASE...$HEAD" | awk '$1=="D"{print $2}' > deleted_files.txt || true
 
-          # Diff for changed code (only context, review is repo-wide)
+          # Focused diff for changed code (context helps), but review will be repo-wide
           CHANGED=$(git diff --name-only "$BASE...$HEAD" || true)
           CHANGED_CODE=$(echo "$CHANGED" | grep -F -f repo_code_files.txt || true)
           if [ -n "$CHANGED_CODE" ]; then
@@ -78,13 +80,13 @@ jobs:
             : > changed_code.diff
           fi
 
+          # Flags for downstream steps
           if [ -s repo_code_files.txt ]; then
             echo "has_code=true" >> $GITHUB_OUTPUT
           else
             echo "has_code=false" >> $GITHUB_OUTPUT
           fi
 
-      # ---------- REPO-WIDE CODE REVIEW (direct comment, no files) ----------
       - name: Prepare repo-wide review prompt
         if: ${{ steps.inv.outputs.has_code == 'true' }}
         run: |
@@ -92,38 +94,42 @@ jobs:
           You are Codex running in CI on a GitHub Pull Request.
 
           GOAL:
-          Review the ENTIRE repository source code (not just the diff) and print a single Markdown report to STDOUT.
+          Review the ENTIRE repository source code (not just the diff) and produce a single Markdown report to STDOUT.
 
           MUST INCLUDE (in this order):
-          1) Summary (one paragraph: key risks & themes)
+          1) Summary
+             - One-paragraph overview of key risks and themes.
           2) Deleted Files & Potential Breakages
-             - Use "deleted_files.txt". For each deleted file, name likely compile/runtime errors or API breakages.
-             - Cite specific dependents (files/symbols) and provide concrete fixes (restore, update imports, replace calls).
+             - Use "deleted_files.txt". For each deleted file, identify plausible compile/runtime errors or API breakages it can cause.
+             - Cite specific dependents (files/symbols) that likely break; show how to fix (restore, update imports, replace calls, etc.).
           3) Vulnerabilities
-             - Injection, deserialization, path traversal, SSRF, XSS, CSRF, command injection, weak crypto, insecure HTTP.
-             - For each finding: file path + line(s), evidence, severity, and exact fix steps.
+             - Look for common security issues (injection, unsafe deserialization, path traversal, SSRF, XSS, CSRF, command injection, weak crypto, insecure HTTP).
+             - Call out risky dependencies or unpinned versions if visible.
+             - For each finding, include file path + line(s), evidence, severity, and concrete fix steps.
           4) Performance
-             - N+1 queries, O(n^2) loops on large data, blocking I/O in hot paths, excessive allocations.
-             - For each: file + line(s) and before/after snippet or micro-optimization.
+             - Identify hot paths, N+1 queries, excessive allocations, unnecessary recomputation, O(n^2) loops on large inputs, blocking I/O on hot paths.
+             - Include file path + line(s) and show before/after code snippets or micro-optimizations.
           5) Hardcoded Secrets
-             - Access keys, tokens, passwords, private keys, conn strings.
-             - For each suspected secret: file + line(s), obfuscate values, and remediation (secrets manager/env vars).
-             - Patterns: AWS_(ACCESS|SECRET)|AKIA|xox[baprs]-|ghp_|ssh\-rsa|BEGIN [A-Z ]+PRIVATE KEY|password\s*=|token\s*=
+             - Scan for access keys, tokens, passwords, private keys, connection strings.
+             - For each suspected secret, list file path + line(s), obfuscate values (do NOT print full secrets), and recommend secret management approach.
+             - Example patterns: AWS_(ACCESS|SECRET)|AKIA|xox[baprs]-|ghp_|ssh\-rsa|BEGIN [A-Z ]+PRIVATE KEY|password\s*=|token\s*=
           6) Code Duplication
-             - Significant duplicate/near-duplicate functions/blocks. Provide file pairs/regions and a refactor plan.
-          7) Changed Code (context)
-             - Use "changed_code.diff" for context only; the review remains repo-wide.
+             - Identify significant duplicate or near-duplicate functions/blocks across files (same/very similar logic).
+             - Provide file pairs/regions, a brief rationale, and a suggested refactor (shared util, template, or abstraction).
+          7) Changed Code (Context)
+             - Use "changed_code.diff" only for additional context; do not limit the review to these changes.
 
-          INPUTS (available in workspace):
-          - repo_code_files.txt : newline list of all code files
+          INPUTS AVAILABLE IN WORKSPACE:
+          - repo_code_files.txt : newline list of all code files in the repo
           - deleted_files.txt   : newline list of files deleted in this PR
-          - changed_code.diff   : unified=0 diff for changed code files
-          - You may open/read repo files.
+          - changed_code.diff   : unified=0 diff for changed code files (context only)
+          - You may open and read any repo files.
 
           CONSTRAINTS:
-          - Be specific and actionable. Include file path(s) and line numbers where possible.
-          - Prefer small patch-style code blocks.
-          - If uncertain, say "Likely" + reasoning.
+          - Be specific and actionable. Always include the file path(s) and line numbers when you can.
+          - Prefer small patch-style code blocks for fixes.
+          - If something is uncertain, say "Likely" and explain the reasoning.
+          - Keep the report tight and useful for reviewers; no boilerplate.
 
           OUTPUT:
           - Print the final Markdown report to STDOUT only (no files).
@@ -139,7 +145,7 @@ jobs:
           if [ -z "$REVIEW" ]; then
             REVIEW=":warning: Codex ran but produced no review output. Check CI logs."
           fi
-          # Optional: truncate to avoid hitting comment size limits
+          # Optional truncation to avoid comment size limits (adjust if needed)
           MAX=120000
           if [ ${#REVIEW} -gt $MAX ]; then
             REVIEW="${REVIEW:0:$MAX}\n\n… _(truncated)_"
@@ -150,7 +156,7 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Post code review comment to PR
+      - name: Post review comment to PR
         if: ${{ steps.inv.outputs.has_code == 'true' }}
         uses: actions/github-script@v7
         env:
@@ -175,152 +181,4 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
               body: ":white_check_mark: No code files found to review (non-code repo or everything excluded)."
-            });
-
-      # ---------- README CREATION/UPDATE (robust + retries + preview) ----------
-      - name: Generate README content with Codex (robust)
-        id: gen_readme
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROMPT="$(cat <<'PROMPT'
-You are Codex helping to create or update README.md for this repository.
-
-OUTPUT STRICTLY:
-- Print a complete README **Markdown** document to STDOUT, starting with a single H1 line "# <Project Title>".
-- Do NOT print explanations or wrap the whole doc in code fences.
-- The README must be substantial (>= 500 characters).
-
-GOAL:
-- If README.md does not exist: generate a full README.md.
-- If it exists: regenerate a full and updated README.md reflecting the current codebase and this PR.
-
-CONTENT (in order):
-1) Title & short description
-2) Quick start (install, build/run/test) with accurate commands for this repo
-3) Configuration & environment variables (use placeholders; no real secrets)
-4) Usage / API (major modules, endpoints, or CLI usage)
-5) Security notes (secret handling, dangerous defaults)
-6) Performance tips (caching, flags, batch sizes)
-7) Troubleshooting (call out likely issues from files listed in deleted_files.txt)
-8) "Changes in PR #${{ github.event.pull_request.number }}" summarizing impact
-9) Contributing & license
-
-INPUTS:
-- repo_code_files.txt  (newline list of all code files)
-- deleted_files.txt    (newline list of files deleted in this PR)
-- changed_code.diff    (unified=0 diff for changed code files)
-- You may open any repo files to infer build & run instructions.
-
-CONSTRAINTS:
-- Use placeholders like YOUR_API_KEY rather than real secrets.
-- Prefer accurate, working commands (detect npm/yarn/pnpm, gradle/maven, go, etc.).
-PROMPT
-)"
-
-          call_codex() {
-            codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow this prompt exactly:\n\n${PROMPT}" || true
-          }
-
-          # Up to 3 attempts with small backoff
-          README_CONTENT="$(call_codex)"
-          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
-            sleep 2
-            README_CONTENT="$(call_codex)"
-          fi
-          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
-            sleep 3
-            README_CONTENT="$(call_codex)"
-          fi
-
-          # Final fallback scaffold
-          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
-            README_CONTENT="# Project
-
-_Auto-generated README scaffold (Codex returned minimal content)._
-
-## Quick Start
-\`\`\`bash
-# fill in actual commands for this repo
-\`\`\`
-
-## Configuration
-Create a \`.env\` with placeholders like:
-- YOUR_API_KEY=...
-- YOUR_DB_URL=...
-
-## Troubleshooting
-- If build fails after deletions in this PR, update imports/paths and module references accordingly.
-"
-          fi
-
-          echo "::group::README preview (first 300 chars)"
-          echo "${README_CONTENT}" | head -c 300
-          echo
-          echo "::endgroup::"
-
-          # Emit for potential consumption; also write candidate file
-          {
-            echo 'body<<EOF'
-            echo "${README_CONTENT}"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-          printf "%s" "${README_CONTENT}" > README.candidate.md
-          [ -s README.candidate.md ] || echo "# Project\n\n_Auto-generated placeholder (empty content)_" > README.candidate.md
-
-      - name: Create or update README.md
-        id: write_readme
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ ! -f README.md ]; then
-            mv README.candidate.md README.md
-            git add README.md
-            git commit -m "docs: create README via Codex [skip ci]" || true
-            (git push origin "HEAD:${HEAD_REF}" && echo "pushed=true" >> $GITHUB_OUTPUT) || echo "pushed=false" >> $GITHUB_OUTPUT
-          else
-            if ! diff -q README.md README.candidate.md >/dev/null 2>&1; then
-              mv README.candidate.md README.md
-              git add README.md
-              git commit -m "docs: update README via Codex [skip ci]" || true
-              (git push origin "HEAD:${HEAD_REF}" && echo "pushed=true" >> $GITHUB_OUTPUT) || echo "pushed=false" >> $GITHUB_OUTPUT
-            else
-              echo "pushed=unchanged" >> $GITHUB_OUTPUT
-            fi
-          fi
-
-      - name: If README push failed or unchanged, post README as PR comment
-        if: ${{ steps.write_readme.outputs.pushed == 'false' || steps.write_readme.outputs.pushed == 'unchanged' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let body = '';
-            try {
-              body = fs.readFileSync('README.candidate.md', 'utf8');
-              if (body.length > 120000) body = body.slice(0, 120000) + "\n\n… _(truncated)_";
-            } catch {
-              body = "_Unable to read generated README from workspace._";
-            }
-            const header = [
-              "### 📘 Proposed README update",
-              "",
-              "_Could not push to the PR branch (likely a fork) **or** README unchanged._",
-              "Copy the content below into **README.md** if you want to apply it:",
-              "",
-              "```markdown",
-            ].join("\n");
-            const footer = "\n```";
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: header + body + footer
             });
