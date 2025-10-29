@@ -1,11 +1,11 @@
-name: Codex PR Review (Repo-wide + Docs Auto-Update)
+name: Codex PR Review (Repo-wide + README Auto-Update)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: write
+  contents: write          # needed to push README updates
   pull-requests: write
 
 jobs:
@@ -44,7 +44,7 @@ jobs:
           query_params = { api-version = "${{ env.AZURE_OPENAI_API_VERSION }}" }
           EOF
 
-      # ---------- INVENTORY + DIFF ----------
+      # ---------- INVENTORY + DELETIONS + DIFF ----------
       - name: Build repo inventory + deletions + diff
         id: inv
         shell: bash
@@ -53,14 +53,23 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+
+          # All tracked files
           git ls-files > all_files.txt
+
+          # Allow-list common code extensions; exclude docs/assets/build/vendor/etc.
           CODE=$(cat all_files.txt | \
             grep -E '\.(c|cc|cpp|cxx|h|hpp|hh|m|mm|cs|go|java|kt|kts|ts|tsx|js|jsx|py|rb|rs|php|swift|scala|lua|pl|erl|ex|exs|r|sql|sh|bash|ps1|dart|vue|svelte|cmake|mk|Makefile|gradle|groovy|zig)$' || true)
           CODE=$(echo "$CODE" | \
             grep -Ev '(^|/)\.github/|(^|/)node_modules/|(^|/)(dist|build|out|coverage|vendor)($|/)' | \
             grep -Ev '\.(ya?ml|toml|ini|conf|json|lock|md|rst|txt|png|jpe?g|gif|svg|pdf|map|min\.js)$' || true)
+
           printf "%s\n" $CODE > repo_code_files.txt || true
+
+          # Deleted files for breakage analysis
           git diff --name-status "$BASE...$HEAD" | awk '$1=="D"{print $2}' > deleted_files.txt || true
+
+          # Diff for changed code (only context, review is repo-wide)
           CHANGED=$(git diff --name-only "$BASE...$HEAD" || true)
           CHANGED_CODE=$(echo "$CHANGED" | grep -F -f repo_code_files.txt || true)
           if [ -n "$CHANGED_CODE" ]; then
@@ -68,40 +77,53 @@ jobs:
           else
             : > changed_code.diff
           fi
+
           if [ -s repo_code_files.txt ]; then
             echo "has_code=true" >> $GITHUB_OUTPUT
           else
             echo "has_code=false" >> $GITHUB_OUTPUT
           fi
 
-      # ---------- REPO-WIDE CODE REVIEW (direct PR comment) ----------
+      # ---------- REPO-WIDE CODE REVIEW (direct comment, no files) ----------
       - name: Prepare repo-wide review prompt
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
         run: |
           cat > review_task.txt << 'PROMPT'
           You are Codex running in CI on a GitHub Pull Request.
 
           GOAL:
-          Review the ENTIRE repository source code (not just the diff) and produce a single Markdown report to STDOUT.
+          Review the ENTIRE repository source code (not just the diff) and print a single Markdown report to STDOUT.
 
           MUST INCLUDE (in this order):
-          1) Summary
-          2) Deleted Files & Potential Breakages (use deleted_files.txt; name dependents and fixes)
-          3) Vulnerabilities (file + lines, evidence, severity, concrete fix)
-          4) Performance (file + lines, before/after snippets)
-          5) Hardcoded Secrets (file + lines, obfuscated values, remediation)
-          6) Code Duplication (file pairs/regions + refactor plan)
-          7) Changed Code (use changed_code.diff for context; review remains repo-wide)
+          1) Summary (one paragraph: key risks & themes)
+          2) Deleted Files & Potential Breakages
+             - Use "deleted_files.txt". For each deleted file, name likely compile/runtime errors or API breakages.
+             - Cite specific dependents (files/symbols) and provide concrete fixes (restore, update imports, replace calls).
+          3) Vulnerabilities
+             - Injection, deserialization, path traversal, SSRF, XSS, CSRF, command injection, weak crypto, insecure HTTP.
+             - For each finding: file path + line(s), evidence, severity, and exact fix steps.
+          4) Performance
+             - N+1 queries, O(n^2) loops on large data, blocking I/O in hot paths, excessive allocations.
+             - For each: file + line(s) and before/after snippet or micro-optimization.
+          5) Hardcoded Secrets
+             - Access keys, tokens, passwords, private keys, conn strings.
+             - For each suspected secret: file + line(s), obfuscate values, and remediation (secrets manager/env vars).
+             - Patterns: AWS_(ACCESS|SECRET)|AKIA|xox[baprs]-|ghp_|ssh\-rsa|BEGIN [A-Z ]+PRIVATE KEY|password\s*=|token\s*=
+          6) Code Duplication
+             - Significant duplicate/near-duplicate functions/blocks. Provide file pairs/regions and a refactor plan.
+          7) Changed Code (context)
+             - Use "changed_code.diff" for context only; the review remains repo-wide.
 
-          INPUTS:
-          - repo_code_files.txt
-          - deleted_files.txt
-          - changed_code.diff
-          - You may open and read repo files.
+          INPUTS (available in workspace):
+          - repo_code_files.txt : newline list of all code files
+          - deleted_files.txt   : newline list of files deleted in this PR
+          - changed_code.diff   : unified=0 diff for changed code files
+          - You may open/read repo files.
 
           CONSTRAINTS:
-          - Be specific and actionable with file paths/line numbers.
-          - Use small patch-style code blocks where helpful.
-          - If uncertain, say "Likely" and explain.
+          - Be specific and actionable. Include file path(s) and line numbers where possible.
+          - Prefer small patch-style code blocks.
+          - If uncertain, say "Likely" + reasoning.
 
           OUTPUT:
           - Print the final Markdown report to STDOUT only (no files).
@@ -109,6 +131,7 @@ jobs:
 
       - name: Run Codex review (repo-wide, no file)
         id: codex_review
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -116,6 +139,7 @@ jobs:
           if [ -z "$REVIEW" ]; then
             REVIEW=":warning: Codex ran but produced no review output. Check CI logs."
           fi
+          # Optional: truncate to avoid hitting comment size limits
           MAX=120000
           if [ ${#REVIEW} -gt $MAX ]; then
             REVIEW="${REVIEW:0:$MAX}\n\n… _(truncated)_"
@@ -127,6 +151,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Post code review comment to PR
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
         uses: actions/github-script@v7
         env:
           REVIEW_BODY_JSON: ${{ toJson(steps.codex_review.outputs.body) }}
@@ -140,112 +165,110 @@ jobs:
               body
             });
 
-      # ---------- README CREATION/UPDATE (robust content write) ----------
-      - name: Prepare README generation prompt
-        run: |
-          cat > readme_task.txt << 'PROMPT'
-          You are Codex helping to create or update README.md for this repository.
-          OUTPUT STRICTLY:
-          - A complete README **Markdown** document starting with a single H1 line "# <Project Title>".
-          - No code fences around the whole document, no extra explanations.
-          - The README must be self-contained and non-empty.
+      - name: Skip – no code files in repo
+        if: ${{ steps.inv.outputs.has_code != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: ":white_check_mark: No code files found to review (non-code repo or everything excluded)."
+            });
 
-          GOAL:
-          - If README.md does not exist: generate a complete README.md.
-          - If it exists: regenerate a full, updated README.md reflecting current codebase and this PR.
-
-          CONTENT REQUIREMENTS (in order):
-          1) Title & short description
-          2) Quick start (install, build/run/test)
-          3) Configuration & environment variables (redact secrets; show sample .env)
-          4) Usage examples / API
-          5) Security notes
-          6) Performance tips
-          7) Troubleshooting (include likely issues from files listed in deleted_files.txt)
-          8) "Changes in PR #${{ github.event.pull_request.number }}" section summarizing impact
-          9) Contributing & license
-
-          INPUTS:
-          - repo_code_files.txt
-          - deleted_files.txt
-          - changed_code.diff
-          - You may open and read repo files.
-
-          CONSTRAINTS:
-          - Include accurate commands matching detected tools (npm/yarn/pnpm, gradle/maven, go, etc.).
-          - Do NOT print actual secrets; use placeholders (e.g., YOUR_API_KEY).
-          - Keep it concise but complete.
-
-          OUTPUT:
-          - Print ONLY the README Markdown (no surrounding ``` fences).
-          PROMPT
-
-      - name: Generate README content with Codex (with fallback)
+      # ---------- README CREATION/UPDATE (robust + retries + preview) ----------
+      - name: Generate README content with Codex (robust)
         id: gen_readme
         shell: bash
         run: |
           set -euo pipefail
-          gen_once() {
-            codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow readme_task.txt. $(cat readme_task.txt)" || true
+
+          PROMPT="$(cat <<'PROMPT'
+You are Codex helping to create or update README.md for this repository.
+
+OUTPUT STRICTLY:
+- Print a complete README **Markdown** document to STDOUT, starting with a single H1 line "# <Project Title>".
+- Do NOT print explanations or wrap the whole doc in code fences.
+- The README must be substantial (>= 500 characters).
+
+GOAL:
+- If README.md does not exist: generate a full README.md.
+- If it exists: regenerate a full and updated README.md reflecting the current codebase and this PR.
+
+CONTENT (in order):
+1) Title & short description
+2) Quick start (install, build/run/test) with accurate commands for this repo
+3) Configuration & environment variables (use placeholders; no real secrets)
+4) Usage / API (major modules, endpoints, or CLI usage)
+5) Security notes (secret handling, dangerous defaults)
+6) Performance tips (caching, flags, batch sizes)
+7) Troubleshooting (call out likely issues from files listed in deleted_files.txt)
+8) "Changes in PR #${{ github.event.pull_request.number }}" summarizing impact
+9) Contributing & license
+
+INPUTS:
+- repo_code_files.txt  (newline list of all code files)
+- deleted_files.txt    (newline list of files deleted in this PR)
+- changed_code.diff    (unified=0 diff for changed code files)
+- You may open any repo files to infer build & run instructions.
+
+CONSTRAINTS:
+- Use placeholders like YOUR_API_KEY rather than real secrets.
+- Prefer accurate, working commands (detect npm/yarn/pnpm, gradle/maven, go, etc.).
+PROMPT
+)"
+
+          call_codex() {
+            codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow this prompt exactly:\n\n${PROMPT}" || true
           }
-          README_CONTENT="$(gen_once)"
 
-          # Fallback if empty or too short (Codex sometimes returns nothing if rate-limited)
-          if [ -z "$README_CONTENT" ] || [ ${#README_CONTENT} -lt 200 ]; then
+          # Up to 3 attempts with small backoff
+          README_CONTENT="$(call_codex)"
+          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
             sleep 2
-            README_CONTENT="$(gen_once)"
+            README_CONTENT="$(call_codex)"
+          fi
+          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
+            sleep 3
+            README_CONTENT="$(call_codex)"
           fi
 
-          # Final fallback scaffold if still empty/short
-          if [ -z "$README_CONTENT" ] || [ ${#README_CONTENT} -lt 200 ]; then
-            README_CONTENT="# Project\n\nAuto-generated README scaffold.\n\n## Quick Start\n\n\`\`\`bash\n# fill in actual commands\n\`\`\`\n\n## Configuration\n- \`YOUR_API_KEY\`=...\n\n## Troubleshooting\n- If build fails after file deletions, check imports/paths changed in this PR.\n"
+          # Final fallback scaffold
+          if [ -z "${README_CONTENT}" ] || [ ${#README_CONTENT} -lt 500 ] || ! grep -qE '^# ' <<<"${README_CONTENT}"; then
+            README_CONTENT="# Project
+
+_Auto-generated README scaffold (Codex returned minimal content)._
+
+## Quick Start
+\`\`\`bash
+# fill in actual commands for this repo
+\`\`\`
+
+## Configuration
+Create a \`.env\` with placeholders like:
+- YOUR_API_KEY=...
+- YOUR_DB_URL=...
+
+## Troubleshooting
+- If build fails after deletions in this PR, update imports/paths and module references accordingly.
+"
           fi
 
-          # Write safely via heredoc to preserve all newlines/characters
-          cat > README.candidate.md <<'EOF_README'
-          '"'"'PLACEHOLDER'"'"'
-          EOF_README
-          # Replace placeholder with actual content (sed-safe replacement)
-          # Use printf to avoid interpretation issues
-          python3 - <<'PY'
-import sys, pathlib
-content = """%s""" % r'''%s'''
-pathlib.Path("README.candidate.md").write_text(content, encoding="utf-8")
-PY
-        env:
-          # Pass README_CONTENT to the python heredoc via env-safe expansion
-          README_CONTENT: ${{ steps.gen_readme.outputs.body || '' }}
-        # The above env won't exist yet; instead, embed directly below:
-        # (GitHub doesn't allow dynamic env expansion inside the python heredoc easily.)
-        # So we embed using bash replacement one level up.
-        # To keep things simple, we re-run the python block with inline string:
-        # Replaced in the next step.
+          echo "::group::README preview (first 300 chars)"
+          echo "${README_CONTENT}" | head -c 300
+          echo
+          echo "::endgroup::"
 
-      - name: Write README.candidate.md correctly
-        id: write_candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The previous step computed README_CONTENT but didn't persist it.
-          # Recreate content deterministically:
-          gen_once() {
-            codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow readme_task.txt. $(cat readme_task.txt)" || true
-          }
-          README_CONTENT="$(gen_once)"
-          if [ -z "$README_CONTENT" ] || [ ${#README_CONTENT} -lt 200 ]; then
-            sleep 2
-            README_CONTENT="$(gen_once)"
-          fi
-          if [ -z "$README_CONTENT" ] || [ ${#README_CONTENT} -lt 200 ]; then
-            README_CONTENT="# Project\n\nAuto-generated README scaffold.\n\n## Quick Start\n\n\`\`\`bash\n# fill in actual commands\n\`\`\`\n\n## Configuration\n- \`YOUR_API_KEY\`=...\n\n## Troubleshooting\n- If build fails after file deletions, check imports/paths changed in this PR.\n"
-          fi
-          # Write with printf to avoid truncation issues
-          printf "%s" "$README_CONTENT" > README.candidate.md
-          # Ensure non-empty
-          if [ ! -s README.candidate.md ]; then
-            echo "# Project\n\n_Auto-generated README (empty content fallback)_" > README.candidate.md
-          fi
-          echo "bytes=$(wc -c < README.candidate.md)" >> $GITHUB_OUTPUT
+          # Emit for potential consumption; also write candidate file
+          {
+            echo 'body<<EOF'
+            echo "${README_CONTENT}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          printf "%s" "${README_CONTENT}" > README.candidate.md
+          [ -s README.candidate.md ] || echo "# Project\n\n_Auto-generated placeholder (empty content)_" > README.candidate.md
 
       - name: Create or update README.md
         id: write_readme
