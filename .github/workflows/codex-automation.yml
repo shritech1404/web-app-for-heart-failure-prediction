@@ -1,0 +1,392 @@
+name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup) + Auto README
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write          # needed to push README changes
+  pull-requests: write
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+
+    env:
+      CODEX_MODEL: gpt-4o-mini
+      AZURE_OPENAI_API_VERSION: preview
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tree
+
+      - name: Install Codex CLI
+        run: npm i -g @openai/codex
+
+      - name: Configure Codex (Azure OpenAI)
+        run: |
+          mkdir -p ~/.codex
+          cat > ~/.codex/config.toml <<'EOF'
+          model = "${{ env.CODEX_MODEL }}"
+          model_provider = "azure"
+          approval_policy = "on-request"
+          model_reasoning_summary = "detailed"
+          model_reasoning_effort = "high"
+
+          [model_providers.azure]
+          name = "Azure"
+          base_url = "${{ secrets.AZURE_OPENAI_ENDPOINT }}/openai/v1"
+          http_headers = { "api-key" = "${{ secrets.AZURE_OPENAI_API_KEY }}" }
+          wire_api = "responses"
+          query_params = { api-version = "${{ env.AZURE_OPENAI_API_VERSION }}" }
+          EOF
+
+      # Build a repo-wide inventory, note deletions, and also keep a focused diff for context.
+      - name: Build repo inventory + deletions + diff
+        id: inv
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # All tracked files in repo
+          git ls-files > all_files.txt
+
+          # Allow-list common code extensions; exclude docs/assets/vendor/build/etc.
+          CODE=$(cat all_files.txt | \
+            grep -E '\.(c|cc|cpp|cxx|h|hpp|hh|m|mm|cs|go|java|kt|kts|ts|tsx|js|jsx|py|rb|rs|php|swift|scala|lua|pl|erl|ex|exs|r|sql|sh|bash|ps1|dart|vue|svelte|cmake|mk|Makefile|gradle|groovy|zig)$' || true)
+
+          CODE=$(echo "$CODE" | \
+            grep -Ev '(^|/)\.github/|(^|/)node_modules/|(^|/)(dist|build|out|coverage|vendor)($|/)' | \
+            grep -Ev '\.(ya?ml|toml|ini|conf|json|lock|md|rst|txt|png|jpe?g|gif|svg|pdf|map|min\.js)$' || true)
+
+          printf "%s\n" $CODE > repo_code_files.txt || true
+
+          # Deleted files between base and head (important for breakage analysis)
+          git diff --name-status "$BASE...$HEAD" | awk '$1=="D"{print $2}' > deleted_files.txt || true
+
+          # Focused diff for changed code (context helps), but review will be repo-wide
+          CHANGED=$(git diff --name-only "$BASE...$HEAD" || true)
+          CHANGED_CODE=$(echo "$CHANGED" | grep -F -f repo_code_files.txt || true)
+          if [ -n "$CHANGED_CODE" ]; then
+            git --no-pager diff --unified=0 "$BASE...$HEAD" -- $CHANGED_CODE > changed_code.diff || true
+          else
+            : > changed_code.diff
+          fi
+
+          # Flags for downstream steps
+          if [ -s repo_code_files.txt ]; then
+            echo "has_code=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_code=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare repo-wide review prompt
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        run: |
+          cat > review_task.txt << 'PROMPT'
+          You are Codex running in CI on a GitHub Pull Request.
+
+          GOAL:
+          Review the ENTIRE repository source code (not just the diff) and produce a single Markdown report to STDOUT.
+
+          MUST INCLUDE (in this order):
+          1) Summary
+             - One-paragraph overview of key risks and themes.
+          2) Deleted Files & Potential Breakages
+             - Use "deleted_files.txt". For each deleted file, identify plausible compile/runtime errors or API breakages it can cause.
+             - Cite specific dependents (files/symbols) that likely break; show how to fix (restore, update imports, replace calls, etc.).
+          3) Vulnerabilities
+             - Look for common security issues (injection, unsafe deserialization, path traversal, SSRF, XSS, CSRF, command injection, weak crypto, insecure HTTP).
+             - Call out risky dependencies or unpinned versions if visible.
+             - For each finding, include file path + line(s), evidence, severity, and concrete fix steps.
+          4) Performance
+             - Identify hot paths, N+1 queries, excessive allocations, unnecessary recomputation, O(n^2) loops on large inputs, blocking I/O on hot paths.
+             - Include file path + line(s) and show before/after code snippets or micro-optimizations.
+          5) Hardcoded Secrets
+             - Scan for access keys, tokens, passwords, private keys, connection strings.
+             - For each suspected secret, list file path + line(s), obfuscate values (do NOT print full secrets), and recommend secret management approach.
+             - Example patterns: AWS_(ACCESS|SECRET)|AKIA|xox[baprs]-|ghp_|ssh\-rsa|BEGIN [A-Z ]+PRIVATE KEY|password\s*=|token\s*=
+          6) Code Duplication
+             - Identify significant duplicate or near-duplicate functions/blocks across files (same/very similar logic).
+             - Provide file pairs/regions, a brief rationale, and a suggested refactor (shared util, template, or abstraction).
+          7) Changed Code (Context)
+             - Use "changed_code.diff" only for additional context; do not limit the review to these changes.
+
+          INPUTS AVAILABLE IN WORKSPACE:
+          - repo_code_files.txt : newline list of all code files in the repo
+          - deleted_files.txt   : newline list of files deleted in this PR
+          - changed_code.diff   : unified=0 diff for changed code files (context only)
+          - You may open and read any repo files.
+
+          CONSTRAINTS:
+          - Be specific and actionable. Always include the file path(s) and line numbers when you can.
+          - Prefer small patch-style code blocks for fixes.
+          - If something is uncertain, say "Likely" and explain the reasoning.
+          - Keep the report tight and useful for reviewers; no boilerplate.
+
+          OUTPUT:
+          - Print the final Markdown report to STDOUT only (no files).
+          PROMPT
+
+      - name: Run Codex review (repo-wide, no file)
+        id: codex_review
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REVIEW="$(codex exec "Read repo_code_files.txt, deleted_files.txt, and changed_code.diff, then follow review_task.txt. $(cat review_task.txt)")" || true
+          if [ -z "$REVIEW" ]; then
+            REVIEW=":warning: Codex ran but produced no review output. Check CI logs."
+          fi
+          MAX=120000
+          if [ ${#REVIEW} -gt $MAX ]; then
+            REVIEW="${REVIEW:0:$MAX}\n\n… _(truncated)_"
+          fi
+          {
+            echo 'body<<EOF'
+            echo "$REVIEW"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post review comment to PR
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          REVIEW_BODY_JSON: ${{ toJson(steps.codex_review.outputs.body) }}
+        with:
+          script: |
+            const body = JSON.parse(process.env.REVIEW_BODY_JSON || '""').trim() || ":warning: Codex output was empty.";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
+
+      # ---------- Auto-generate / update README based on repo + PR changes ----------
+      - name: Generate auto README content from repo + PR changes
+        id: gen_readme
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          START="<!-- AUTO-README:START -->"
+          END="<!-- AUTO-README:END -->"
+
+          # Detect stack
+          STACK=()
+          [ -f package.json ] && STACK+=("Node.js")
+          [ -f pnpm-lock.yaml ] && STACK+=("pnpm")
+          [ -f yarn.lock ] && STACK+=("Yarn")
+          [ -f requirements.txt ] && STACK+=("Python")
+          [ -f pyproject.toml ] && STACK+=("Python (Poetry/PDM)")
+          [ -f Pipfile ] && STACK+=("Python (Pipenv)")
+          [ -f go.mod ] && STACK+=("Go")
+          [ -f Cargo.toml ] && STACK+=("Rust")
+          [ -f pom.xml ] && STACK+=("Java (Maven)")
+          ls | grep -q 'build.gradle' && STACK+=("Java/Kotlin (Gradle)") || true
+          [ -f composer.json ] && STACK+=("PHP (Composer)")
+          [ -f .swiftlint.yml ] && STACK+=("Swift")
+          [ -f Makefile ] && STACK+=("Makefile")
+
+          # Language summary (simple heuristic by extension)
+          LANG_SUMMARY=$(
+            awk -F. 'NF>1{print tolower($NF)}' repo_code_files.txt 2>/dev/null | \
+            awk '{
+              ext=$1
+              lang = (ext=="ts"||ext=="tsx")?"TypeScript" :
+                     (ext=="js"||ext=="jsx")?"JavaScript" :
+                     (ext=="py")?"Python" :
+                     (ext=="go")?"Go" :
+                     (ext=="rs")?"Rust" :
+                     (ext=="java"||ext=="kt"||ext=="kts")?"JVM (Java/Kotlin)" :
+                     (ext=="rb")?"Ruby" :
+                     (ext=="php")?"PHP" :
+                     (ext=="swift")?"Swift" :
+                     (ext=="cs")?"C#" :
+                     (ext=="c"||ext=="h")?"C" :
+                     (ext=="cpp"||ext=="cc"||ext=="cxx"||ext=="hpp"||ext=="hh")?"C++" :
+                     (ext=="scala")?"Scala" :
+                     (ext=="dart")?"Dart" :
+                     (ext=="lua")?"Lua" :
+                     (ext=="sh"||ext=="bash")?"Shell" :
+                     (ext=="sql")?"SQL" :
+                     (ext=="pl"||ext=="erl"||ext=="ex"||ext=="exs")?"BEAM (Perl/Erlang/Elixir)" :
+                     "Other";
+              count[lang]++
+            } END {for (k in count) printf "- %s: %d files\n", k, count[k] }'
+          )
+
+          # Project structure (compact)
+          tree -L 2 -I 'node_modules|.git|dist|build|out|coverage|.venv|__pycache__|*.egg-info|*.class|target|vendor|.github' -a . > .proj_tree.txt || true
+          head -n 300 .proj_tree.txt > .proj_tree_short.txt
+
+          # Commands (best-effort detection)
+          QUICKSTART=""
+          if [ -f package.json ]; then
+            NAME=$(node -e "try{console.log(require('./package.json').name||'') }catch(e){console.log('')}")
+            TEST=$(node -e "try{console.log((require('./package.json').scripts||{}).test||'') }catch(e){console.log('')}")
+            START_SCRIPT=$(node -e "try{console.log((require('./package.json').scripts||{}).start||'') }catch(e){console.log('')}")
+            BUILD=$(node -e "try{console.log((require('./package.json').scripts||{}).build||'') }catch(e){console.log('')}")
+            PKG_MGR="npm"
+            [ -f pnpm-lock.yaml ] && PKG_MGR="pnpm"
+            [ -f yarn.lock ] && PKG_MGR="yarn"
+            QUICKSTART+="\n**Node.js**"
+            QUICKSTART+="\n\`\`\`bash\n${PKG_MGR} install\n${BUILD:+${PKG_MGR} run build\n}${START_SCRIPT:+${PKG_MGR} run start\n}${TEST:+${PKG_MGR} test\n}\`\`\`\n"
+          fi
+          if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f Pipfile ]; then
+            QUICKSTART+="\n**Python**"
+            QUICKSTART+="\n\`\`\`bash\npython -m venv .venv && . .venv/bin/activate\n"
+            if [ -f requirements.txt ]; then QUICKSTART+="pip install -r requirements.txt\n"; fi
+            if [ -f pyproject.toml ]; then QUICKSTART+="pip install -U pip && pip install .\n"; fi
+            if [ -f Pipfile ]; then QUICKSTART+="pip install pipenv && pipenv install\n"; fi
+            QUICKSTART+="\`\`\`\n"
+          fi
+          if [ -f go.mod ]; then
+            QUICKSTART+="\n**Go**\n\`\`\`bash\ngo mod download\ngo build ./...\ngo test ./...\n\`\`\`\n"
+          fi
+          if [ -f Cargo.toml ]; then
+            QUICKSTART+="\n**Rust**\n\`\`\`bash\ncargo build\ncargo test\n\`\`\`\n"
+          fi
+          if [ -f pom.xml ] || ls build.gradle* >/dev/null 2>&1; then
+            if [ -f pom.xml ]; then
+              QUICKSTART+="\n**Java (Maven)**\n\`\`\`bash\nmvn -q -DskipTests package\nmvn test\n\`\`\`\n"
+            fi
+            if ls build.gradle* >/dev/null 2>&1; then
+              QUICKSTART+="\n**Java/Kotlin (Gradle)**\n\`\`\`bash\n./gradlew build -x test\n./gradlew test\n\`\`\`\n"
+            fi
+          fi
+          if [ -f Makefile ]; then
+            QUICKSTART+="\n**Makefile**\n\`\`\`bash\nmake help || true\nmake build || true\nmake test || true\n\`\`\`\n"
+          fi
+
+          # PR change summary
+          {
+            echo "Changed files (BASE..HEAD):"
+            git diff --name-status "$BASE...$HEAD" | sed -n '1,100p' || true
+            echo
+            echo "_(showing up to 100 entries)_"
+          } > .pr_changes.txt
+
+          STACK_TXT=$(printf "%s" "${STACK[*]}" | sed 's/ /, /g')
+          [ -z "$STACK_TXT" ] && STACK_TXT="(auto-detected)"
+
+          cat > .auto_readme_block.md <<EOF
+          $START
+          _Auto-generated from repository state at **$TS** (UTC) for PR [#$PR_NUMBER]($PR_URL)._  
+          Workflow run: $RUN_URL
+
+          ### Tech Stack (detected)
+          ${STACK_TXT}
+
+          ### Language Summary
+          ${LANG_SUMMARY:-"(no code files detected)"}
+
+          ### Quickstart
+          ${QUICKSTART:-"_No standard build config detected. Add your setup commands here._"}
+
+          ### Project Structure (top levels)
+          \`\`\`
+          $(cat .proj_tree_short.txt 2>/dev/null || echo "(structure unavailable)")
+          \`\`\`
+
+          ### PR Changes
+          \`\`\`
+          $(cat .pr_changes.txt)
+          \`\`\`
+          $END
+          EOF
+
+          # Expose for next step
+          echo "start_marker=$START" >> $GITHUB_OUTPUT
+          echo "end_marker=$END" >> $GITHUB_OUTPUT
+
+      # Normalize placeholder README content before upsert
+      - name: Normalize placeholder README (treat as empty)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="README.md"
+          PLACEHOLDER_PATTERN="auto-generated but Codex returned no details"
+
+          if [ -f "$FILE" ] && grep -qi "$PLACEHOLDER_PATTERN" "$FILE"; then
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+
+      - name: Upsert README.md
+        shell: bash
+        env:
+          START: ${{ steps.gen_readme.outputs.start_marker }}
+          END: ${{ steps.gen_readme.outputs.end_marker }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          FILE="README.md"
+
+          # 1) Create if missing; 2) If empty or tiny, seed header
+          if [ ! -f "$FILE" ]; then
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+          NONEMPTY=$(grep -cve '^\s*$' "$FILE" || true)
+          if [ "$NONEMPTY" -le 3 ]; then
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+
+          # Replace or append managed block
+          if grep -q "$START" "$FILE"; then
+            awk -v start="$START" -v end="$END" '
+              BEGIN{inblk=0}
+              {
+                if ($0==start){print; inblk=1; while ((getline l<".auto_readme_block.md")>0) print l; next}
+                if ($0==end && inblk==1){inblk=0; next}
+                if (inblk==0) print
+              }
+            ' "$FILE" > README.tmp && mv README.tmp "$FILE"
+          else
+            printf "\n" >> "$FILE"
+            cat .auto_readme_block.md >> "$FILE"
+          fi
+
+          # Commit & push only if changed
+          if ! git diff --quiet -- "$FILE"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$FILE"
+            git commit -m "docs(readme): auto-update from repo & PR #$PR_NUMBER"
+            git push || true   # tolerate forks with restricted perms
+          fi
+
+      - name: Skip – no code files in repo
+        if: ${{ steps.inv.outputs.has_code != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: ":white_check_mark: No code files found to review (non-code repo or everything excluded)."
+            });

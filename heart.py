@@ -8,7 +8,7 @@ target = heart.DEATH_EVENT
 
 heart = heart.drop('DEATH_EVENT', axis='columns')
 heart
-
+print("hello")
 from sklearn.model_selection import train_test_split
 X_train, X_test, y_train, y_test = train_test_split(heart, target, test_size=0.2, random_state=10)
 
@@ -34,7 +34,7 @@ cv = KFold(n_splits=10, random_state=1, shuffle=True)
 scores = cross_val_score(LogisticRegression(), heart, target, scoring='accuracy', cv=cv, n_jobs=-1)
 acc = mean(scores)
 
-
+print("Heart_Disease")
 import pickle
 pickle.dump(model, open('heart.pkl', 'wb'))
 model=pickle.load(open('heart.pkl','rb'))
