@@ -1,11 +1,11 @@
-name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup)
+name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup + README Update)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: read
+  contents: write         # was: read — needed to push README changes
   pull-requests: write
 
 jobs:
@@ -170,6 +170,68 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body
             });
+
+      # --- NEW: Update README.md with the latest Codex review snippet and metadata ---
+      - name: Update README with latest Codex review
+        if: ${{ steps.inv.outputs.has_code == 'true' }}
+        shell: bash
+        env:
+          REVIEW_BODY: ${{ steps.codex_review.outputs.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          FILE="README.md"
+          START="<!-- CODEX-REVIEW:START -->"
+          END="<!-- CODEX-REVIEW:END -->"
+
+          # Create a short snippet (first 50 lines) to keep README manageable
+          SNIPPET="$(printf "%s" "$REVIEW_BODY" | sed -n '1,50p')"
+          TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          cat > .codex_readme_block.md <<EOF
+          $START
+          _Automated Codex PR Review update for PR [#$PR_NUMBER]($PR_URL) at **$TS** (UTC)._  
+          Workflow run: $RUN_URL
+
+          ### Latest Review Snippet
+          $SNIPPET
+
+          $END
+          EOF
+
+          # Ensure README exists
+          if [ ! -f "$FILE" ]; then
+            echo "# ${REPO_NAME##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+
+          # If markers already exist, replace the block; otherwise append it
+          if grep -q "$START" "$FILE"; then
+            awk -v start="$START" -v end="$END" '
+              BEGIN{inblk=0}
+              {
+                if ($0==start){print; inblk=1; while ((getline l<".codex_readme_block.md")>0) print l; next}
+                if ($0==end && inblk==1){inblk=0; next}
+                if (inblk==0) print
+              }
+            ' "$FILE" > README.tmp && mv README.tmp "$FILE"
+          else
+            printf "\n" >> "$FILE"
+            cat .codex_readme_block.md >> "$FILE"
+          fi
+
+          # Commit and push only if there are changes
+          if ! git diff --quiet -- "$FILE"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$FILE"
+            git commit -m "docs(readme): update Codex PR Review snippet for PR #$PR_NUMBER"
+            git push || true  # tolerates forks with restricted perms
+          fi
 
       - name: Skip – no code files in repo
         if: ${{ steps.inv.outputs.has_code != 'true' }}
