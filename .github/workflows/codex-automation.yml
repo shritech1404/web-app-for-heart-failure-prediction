@@ -175,7 +175,7 @@ jobs:
               body
             });
 
-      # ---------- NEW: Auto-generate / update README based on repo + PR changes ----------
+      # ---------- Auto-generate / update README based on repo + PR changes ----------
       - name: Generate auto README content from repo + PR changes
         id: gen_readme
         shell: bash
@@ -211,7 +211,7 @@ jobs:
 
           # Language summary (simple heuristic by extension)
           LANG_SUMMARY=$(
-            awk -F. 'NF>1{print tolower($NF)}' repo_code_files.txt | \
+            awk -F. 'NF>1{print tolower($NF)}' repo_code_files.txt 2>/dev/null | \
             awk '{
               ext=$1
               lang = (ext=="ts"||ext=="tsx")?"TypeScript" :
@@ -246,13 +246,13 @@ jobs:
           if [ -f package.json ]; then
             NAME=$(node -e "try{console.log(require('./package.json').name||'') }catch(e){console.log('')}")
             TEST=$(node -e "try{console.log((require('./package.json').scripts||{}).test||'') }catch(e){console.log('')}")
-            START=$(node -e "try{console.log((require('./package.json').scripts||{}).start||'') }catch(e){console.log('')}")
+            START_SCRIPT=$(node -e "try{console.log((require('./package.json').scripts||{}).start||'') }catch(e){console.log('')}")
             BUILD=$(node -e "try{console.log((require('./package.json').scripts||{}).build||'') }catch(e){console.log('')}")
             PKG_MGR="npm"
             [ -f pnpm-lock.yaml ] && PKG_MGR="pnpm"
             [ -f yarn.lock ] && PKG_MGR="yarn"
             QUICKSTART+="\n**Node.js**"
-            QUICKSTART+="\n\`\`\`bash\n${PKG_MGR} install\n${BUILD:+${PKG_MGR} run build\n}${START:+${PKG_MGR} run start\n}${TEST:+${PKG_MGR} test\n}\`\`\`\n"
+            QUICKSTART+="\n\`\`\`bash\n${PKG_MGR} install\n${BUILD:+${PKG_MGR} run build\n}${START_SCRIPT:+${PKG_MGR} run start\n}${TEST:+${PKG_MGR} test\n}\`\`\`\n"
           fi
           if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f Pipfile ]; then
             QUICKSTART+="\n**Python**"
@@ -321,6 +321,19 @@ jobs:
           echo "start_marker=$START" >> $GITHUB_OUTPUT
           echo "end_marker=$END" >> $GITHUB_OUTPUT
 
+      # Normalize placeholder README content before upsert
+      - name: Normalize placeholder README (treat as empty)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="README.md"
+          PLACEHOLDER_PATTERN="auto-generated but Codex returned no details"
+
+          if [ -f "$FILE" ] && grep -qi "$PLACEHOLDER_PATTERN" "$FILE"; then
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+
       - name: Upsert README.md
         shell: bash
         env:
@@ -331,18 +344,19 @@ jobs:
           set -euo pipefail
           FILE="README.md"
 
-          # 1) Create if missing; 2) If empty, seed header; 3) Else, update managed block.
+          # 1) Create if missing; 2) If empty or tiny, seed header
           if [ ! -f "$FILE" ]; then
             echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
             echo >> "$FILE"
           fi
-          if [ ! -s "$FILE" ]; then
-            echo "This README is auto-generated and will be augmented over time." >> "$FILE"
+          NONEMPTY=$(grep -cve '^\s*$' "$FILE" || true)
+          if [ "$NONEMPTY" -le 3 ]; then
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
             echo >> "$FILE"
           fi
 
+          # Replace or append managed block
           if grep -q "$START" "$FILE"; then
-            # Replace existing managed block
             awk -v start="$START" -v end="$END" '
               BEGIN{inblk=0}
               {
@@ -352,7 +366,6 @@ jobs:
               }
             ' "$FILE" > README.tmp && mv README.tmp "$FILE"
           else
-            # Append managed block at the end
             printf "\n" >> "$FILE"
             cat .auto_readme_block.md >> "$FILE"
           fi
