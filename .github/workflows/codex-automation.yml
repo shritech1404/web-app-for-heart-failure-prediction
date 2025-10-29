@@ -1,11 +1,11 @@
-name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup + README Update)
+name: Codex PR Review (Repo-wide + Deleted Files + Sec/Perf/Secrets/Dup) + Auto README
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: write         # was: read — needed to push README changes
+  contents: write          # needed to push README changes
   pull-requests: write
 
 jobs:
@@ -23,6 +23,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
+
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tree
 
       - name: Install Codex CLI
         run: npm i -g @openai/codex
@@ -145,7 +150,6 @@ jobs:
           if [ -z "$REVIEW" ]; then
             REVIEW=":warning: Codex ran but produced no review output. Check CI logs."
           fi
-          # Optional truncation to avoid comment size limits (adjust if needed)
           MAX=120000
           if [ ${#REVIEW} -gt $MAX ]; then
             REVIEW="${REVIEW:0:$MAX}\n\n… _(truncated)_"
@@ -171,12 +175,13 @@ jobs:
               body
             });
 
-      # --- NEW: Update README.md with the latest Codex review snippet and metadata ---
-      - name: Update README with latest Codex review
-        if: ${{ steps.inv.outputs.has_code == 'true' }}
+      # ---------- NEW: Auto-generate / update README based on repo + PR changes ----------
+      - name: Generate auto README content from repo + PR changes
+        id: gen_readme
         shell: bash
         env:
-          REVIEW_BODY: ${{ steps.codex_review.outputs.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -184,53 +189,181 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="README.md"
-          START="<!-- CODEX-REVIEW:START -->"
-          END="<!-- CODEX-REVIEW:END -->"
-
-          # Create a short snippet (first 50 lines) to keep README manageable
-          SNIPPET="$(printf "%s" "$REVIEW_BODY" | sed -n '1,50p')"
           TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          START="<!-- AUTO-README:START -->"
+          END="<!-- AUTO-README:END -->"
 
-          cat > .codex_readme_block.md <<EOF
+          # Detect stack
+          STACK=()
+          [ -f package.json ] && STACK+=("Node.js")
+          [ -f pnpm-lock.yaml ] && STACK+=("pnpm")
+          [ -f yarn.lock ] && STACK+=("Yarn")
+          [ -f requirements.txt ] && STACK+=("Python")
+          [ -f pyproject.toml ] && STACK+=("Python (Poetry/PDM)")
+          [ -f Pipfile ] && STACK+=("Python (Pipenv)")
+          [ -f go.mod ] && STACK+=("Go")
+          [ -f Cargo.toml ] && STACK+=("Rust")
+          [ -f pom.xml ] && STACK+=("Java (Maven)")
+          ls | grep -q 'build.gradle' && STACK+=("Java/Kotlin (Gradle)") || true
+          [ -f composer.json ] && STACK+=("PHP (Composer)")
+          [ -f .swiftlint.yml ] && STACK+=("Swift")
+          [ -f Makefile ] && STACK+=("Makefile")
+
+          # Language summary (simple heuristic by extension)
+          LANG_SUMMARY=$(
+            awk -F. 'NF>1{print tolower($NF)}' repo_code_files.txt | \
+            awk '{
+              ext=$1
+              lang = (ext=="ts"||ext=="tsx")?"TypeScript" :
+                     (ext=="js"||ext=="jsx")?"JavaScript" :
+                     (ext=="py")?"Python" :
+                     (ext=="go")?"Go" :
+                     (ext=="rs")?"Rust" :
+                     (ext=="java"||ext=="kt"||ext=="kts")?"JVM (Java/Kotlin)" :
+                     (ext=="rb")?"Ruby" :
+                     (ext=="php")?"PHP" :
+                     (ext=="swift")?"Swift" :
+                     (ext=="cs")?"C#" :
+                     (ext=="c"||ext=="h")?"C" :
+                     (ext=="cpp"||ext=="cc"||ext=="cxx"||ext=="hpp"||ext=="hh")?"C++" :
+                     (ext=="scala")?"Scala" :
+                     (ext=="dart")?"Dart" :
+                     (ext=="lua")?"Lua" :
+                     (ext=="sh"||ext=="bash")?"Shell" :
+                     (ext=="sql")?"SQL" :
+                     (ext=="pl"||ext=="erl"||ext=="ex"||ext=="exs")?"BEAM (Perl/Erlang/Elixir)" :
+                     "Other";
+              count[lang]++
+            } END {for (k in count) printf "- %s: %d files\n", k, count[k] }'
+          )
+
+          # Project structure (compact)
+          tree -L 2 -I 'node_modules|.git|dist|build|out|coverage|.venv|__pycache__|*.egg-info|*.class|target|vendor|.github' -a . > .proj_tree.txt || true
+          head -n 300 .proj_tree.txt > .proj_tree_short.txt
+
+          # Commands (best-effort detection)
+          QUICKSTART=""
+          if [ -f package.json ]; then
+            NAME=$(node -e "try{console.log(require('./package.json').name||'') }catch(e){console.log('')}")
+            TEST=$(node -e "try{console.log((require('./package.json').scripts||{}).test||'') }catch(e){console.log('')}")
+            START=$(node -e "try{console.log((require('./package.json').scripts||{}).start||'') }catch(e){console.log('')}")
+            BUILD=$(node -e "try{console.log((require('./package.json').scripts||{}).build||'') }catch(e){console.log('')}")
+            PKG_MGR="npm"
+            [ -f pnpm-lock.yaml ] && PKG_MGR="pnpm"
+            [ -f yarn.lock ] && PKG_MGR="yarn"
+            QUICKSTART+="\n**Node.js**"
+            QUICKSTART+="\n\`\`\`bash\n${PKG_MGR} install\n${BUILD:+${PKG_MGR} run build\n}${START:+${PKG_MGR} run start\n}${TEST:+${PKG_MGR} test\n}\`\`\`\n"
+          fi
+          if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f Pipfile ]; then
+            QUICKSTART+="\n**Python**"
+            QUICKSTART+="\n\`\`\`bash\npython -m venv .venv && . .venv/bin/activate\n"
+            if [ -f requirements.txt ]; then QUICKSTART+="pip install -r requirements.txt\n"; fi
+            if [ -f pyproject.toml ]; then QUICKSTART+="pip install -U pip && pip install .\n"; fi
+            if [ -f Pipfile ]; then QUICKSTART+="pip install pipenv && pipenv install\n"; fi
+            QUICKSTART+="\`\`\`\n"
+          fi
+          if [ -f go.mod ]; then
+            QUICKSTART+="\n**Go**\n\`\`\`bash\ngo mod download\ngo build ./...\ngo test ./...\n\`\`\`\n"
+          fi
+          if [ -f Cargo.toml ]; then
+            QUICKSTART+="\n**Rust**\n\`\`\`bash\ncargo build\ncargo test\n\`\`\`\n"
+          fi
+          if [ -f pom.xml ] || ls build.gradle* >/dev/null 2>&1; then
+            if [ -f pom.xml ]; then
+              QUICKSTART+="\n**Java (Maven)**\n\`\`\`bash\nmvn -q -DskipTests package\nmvn test\n\`\`\`\n"
+            fi
+            if ls build.gradle* >/dev/null 2>&1; then
+              QUICKSTART+="\n**Java/Kotlin (Gradle)**\n\`\`\`bash\n./gradlew build -x test\n./gradlew test\n\`\`\`\n"
+            fi
+          fi
+          if [ -f Makefile ]; then
+            QUICKSTART+="\n**Makefile**\n\`\`\`bash\nmake help || true\nmake build || true\nmake test || true\n\`\`\`\n"
+          fi
+
+          # PR change summary
+          {
+            echo "Changed files (BASE..HEAD):"
+            git diff --name-status "$BASE...$HEAD" | sed -n '1,100p' || true
+            echo
+            echo "_(showing up to 100 entries)_"
+          } > .pr_changes.txt
+
+          STACK_TXT=$(printf "%s" "${STACK[*]}" | sed 's/ /, /g')
+          [ -z "$STACK_TXT" ] && STACK_TXT="(auto-detected)"
+
+          cat > .auto_readme_block.md <<EOF
           $START
-          _Automated Codex PR Review update for PR [#$PR_NUMBER]($PR_URL) at **$TS** (UTC)._  
+          _Auto-generated from repository state at **$TS** (UTC) for PR [#$PR_NUMBER]($PR_URL)._  
           Workflow run: $RUN_URL
 
-          ### Latest Review Snippet
-          $SNIPPET
+          ### Tech Stack (detected)
+          ${STACK_TXT}
 
+          ### Language Summary
+          ${LANG_SUMMARY:-"(no code files detected)"}
+
+          ### Quickstart
+          ${QUICKSTART:-"_No standard build config detected. Add your setup commands here._"}
+
+          ### Project Structure (top levels)
+          \`\`\`
+          $(cat .proj_tree_short.txt 2>/dev/null || echo "(structure unavailable)")
+          \`\`\`
+
+          ### PR Changes
+          \`\`\`
+          $(cat .pr_changes.txt)
+          \`\`\`
           $END
           EOF
 
-          # Ensure README exists
+          # Expose for next step
+          echo "start_marker=$START" >> $GITHUB_OUTPUT
+          echo "end_marker=$END" >> $GITHUB_OUTPUT
+
+      - name: Upsert README.md
+        shell: bash
+        env:
+          START: ${{ steps.gen_readme.outputs.start_marker }}
+          END: ${{ steps.gen_readme.outputs.end_marker }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          FILE="README.md"
+
+          # 1) Create if missing; 2) If empty, seed header; 3) Else, update managed block.
           if [ ! -f "$FILE" ]; then
-            echo "# ${REPO_NAME##*/}" > "$FILE"
+            echo "# ${GITHUB_REPOSITORY##*/}" > "$FILE"
+            echo >> "$FILE"
+          fi
+          if [ ! -s "$FILE" ]; then
+            echo "This README is auto-generated and will be augmented over time." >> "$FILE"
             echo >> "$FILE"
           fi
 
-          # If markers already exist, replace the block; otherwise append it
           if grep -q "$START" "$FILE"; then
+            # Replace existing managed block
             awk -v start="$START" -v end="$END" '
               BEGIN{inblk=0}
               {
-                if ($0==start){print; inblk=1; while ((getline l<".codex_readme_block.md")>0) print l; next}
+                if ($0==start){print; inblk=1; while ((getline l<".auto_readme_block.md")>0) print l; next}
                 if ($0==end && inblk==1){inblk=0; next}
                 if (inblk==0) print
               }
             ' "$FILE" > README.tmp && mv README.tmp "$FILE"
           else
+            # Append managed block at the end
             printf "\n" >> "$FILE"
-            cat .codex_readme_block.md >> "$FILE"
+            cat .auto_readme_block.md >> "$FILE"
           fi
 
-          # Commit and push only if there are changes
+          # Commit & push only if changed
           if ! git diff --quiet -- "$FILE"; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add "$FILE"
-            git commit -m "docs(readme): update Codex PR Review snippet for PR #$PR_NUMBER"
-            git push || true  # tolerates forks with restricted perms
+            git commit -m "docs(readme): auto-update from repo & PR #$PR_NUMBER"
+            git push || true   # tolerate forks with restricted perms
           fi
 
       - name: Skip – no code files in repo
